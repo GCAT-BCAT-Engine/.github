@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "repo_id": "GCAT-BCAT-Engine/.github",
+  "enforcement": "warn",
+  "purpose": "Canonical GCAT-BCAT-Engine organizational ingress/egress boundary definition",
+  "expected_structure": {
+    "GCAT_BCAT_ENGINE_ORG_BOUNDARY_MIRROR_HANDOFF.md": {
+      "required": true
+    },
+    "org-boundary/README.md": {
+      "required": true
+    },
+    "org-boundary/schemas/intr-envelope.schema.json": {
+      "required": true
+    },
+    "org-boundary/evidence/receipt-chain.schema.json": {
+      "required": true
+    },
+    "org-boundary/registry/services.json": {
+      "required": true
+    }
+  }
+}
