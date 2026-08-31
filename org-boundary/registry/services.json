@@ -3,6 +3,13 @@
   "organization": "GCAT-BCAT-Engine",
   "services": [
     {
+      "service_id": "gcat-bcat-engine.boundary-diagnostic",
+      "repository": "GCAT-BCAT-Engine/.github",
+      "boundary_role": "BOUNDARY_LOCAL_DIAGNOSTIC",
+      "profile_status": "ACTIVE",
+      "runtime_required_for_consumption": false
+    },
+    {
       "service_id": "gcat-bcat-engine.documentation",
       "repository": "GCAT-BCAT-Engine/Documentation",
       "boundary_role": "INTERNAL_ENDPOINT",
