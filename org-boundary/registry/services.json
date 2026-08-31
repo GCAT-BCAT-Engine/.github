@@ -3,6 +3,18 @@
   "organization": "GCAT-BCAT-Engine",
   "services": [
     {
+      "service_id": "gcat-bcat-engine.org-control",
+      "repository": "GCAT-BCAT-Engine/.github",
+      "boundary_role": "BOUNDARY_LOCAL_CONTROL",
+      "profile_status": "ACTIVE",
+      "accepts": [
+        "ecosystem.communication",
+        "ecosystem.monitor.request",
+        "ecosystem.work.request"
+      ],
+      "runtime_required_for_consumption": false
+    },
+    {
       "service_id": "gcat-bcat-engine.boundary-diagnostic",
       "repository": "GCAT-BCAT-Engine/.github",
       "boundary_role": "BOUNDARY_LOCAL_DIAGNOSTIC",
