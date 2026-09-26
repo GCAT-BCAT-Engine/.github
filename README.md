@@ -1,0 +1,3 @@
+# GCAT-BCAT-Engine organization coordination
+
+Existing organizational ingress/egress authority is documented in [`GCAT_BCAT_ENGINE_ORG_BOUNDARY_MIRROR_HANDOFF.md`](GCAT_BCAT_ENGINE_ORG_BOUNDARY_MIRROR_HANDOFF.md). The bounded [source-owned open-source inventory](docs/OPEN_SOURCE_ORGANIZATION_INVENTORY_20260925.json) records default-branch root LICENSE observations for fifteen known repositories under existing central goal `ECOSYSTEM-OPEN-SOURCE-STRATEGY-001`, COSV `20010010100000`. This internal inventory is evidence only, not independent copyright, relicensing, source redistribution or release authorization. Central handoffs may use public-safe aggregate counts only.
