@@ -1,0 +1,139 @@
+{
+  "schema": "stegverse.organization-open-source-inventory/v1",
+  "organization": "GCAT-BCAT-Engine",
+  "snapshot_date": "2026-09-25",
+  "canonical_goal": "ECOSYSTEM-OPEN-SOURCE-STRATEGY-001",
+  "cosv": "20010010100000",
+  "visibility": "INTERNAL_SOURCE_OWNER_EVIDENCE",
+  "coverage": "15 repositories returned by authenticated organization-scoped GitHub listing; root LICENSE path read at each default branch",
+  "counts": {
+    "repositories": 15,
+    "public": 7,
+    "private": 7,
+    "internal": 1,
+    "root_license_found": 5,
+    "root_license_not_found": 10,
+    "observed_mit_text": 1,
+    "observed_apache_2_text": 1,
+    "observed_custom_text": 3,
+    "file_level_rights_verified": 0,
+    "independent_copyright_title_verified": 0,
+    "release_authorizations": 0
+  },
+  "repositories": [
+    {
+      "repository": "GCAT-BCAT-Engine/Gemstone_IV",
+      "visibility": "private",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/Publisher",
+      "visibility": "public",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "CUSTOM_RESTRICTIVE",
+      "root_license_blob_sha": "0b56bc7f6cf76ebbaadf01f6e0b0b92485e8d5df"
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/Triage",
+      "visibility": "public",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "APACHE_2_TEXT",
+      "root_license_blob_sha": "108b757d6478691dc39ecb7596624c4b1ac0ba22"
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/WZ",
+      "visibility": "private",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/Marketplace",
+      "visibility": "private",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/core-lite",
+      "visibility": "public",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "MIT_TEXT",
+      "root_license_blob_sha": "8025af7fe6fc7fa31f2724c9487f12d81c27972d"
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/core-full",
+      "visibility": "private",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "CUSTOM_RESTRICTIVE",
+      "root_license_blob_sha": "edeab49f575a6e97f59cba2dd8eeed2bbf5312c6"
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/core-addons",
+      "visibility": "private",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "CUSTOM_PER_ADDON",
+      "root_license_blob_sha": "1f7d4de4b6ba2899607f44e1e6b4193b192eb5f7"
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/workflows",
+      "visibility": "public",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/telemetry",
+      "visibility": "private",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/core-master",
+      "visibility": "private",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/Documentation",
+      "visibility": "public",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/core-lite-prod",
+      "visibility": "public",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/StegSim",
+      "visibility": "public",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    },
+    {
+      "repository": "GCAT-BCAT-Engine/.github",
+      "visibility": "internal",
+      "root_license_path": "LICENSE",
+      "root_license_observation": "NOT_FOUND_AT_CHECKED_ROOT",
+      "root_license_blob_sha": null
+    }
+  ],
+  "scope_notes": [
+    "Source-owner internal evidence; central public census must report aggregate counts only and exclude private repository identities.",
+    "Triage root license starts with Apache License version 2.0; full compatibility and provenance not yet cleared.",
+    "Publisher root contains custom restrictive StegVerse Publisher license; its embedded dependency-description is not a verified separate dependency grant.",
+    "core-lite root contains MIT text, but this is GCAT-BCAT-Engine/core-lite, not SDK-pinned Data-Continuation/core-lite.",
+    "core-full and core-addons have restrictive custom root license text; addon modules may have independent license scopes.",
+    "Root LICENSE missing is not proof no file-level or historical license exists.",
+    "No mutation to existing licenses, release, InTr authority, Master Records or rights-holder grants."
+  ]
+}
