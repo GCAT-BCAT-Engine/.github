@@ -22,6 +22,20 @@
       "runtime_required_for_consumption": false
     },
     {
+      "service_id": "gcat-bcat-engine.organization-role-conformance",
+      "repository": "GCAT-BCAT-Engine/.github",
+      "boundary_role": "BOUNDARY_LOCAL_CONFORMANCE",
+      "profile_status": "ACTIVE_SOURCE_ONLY_RUNTIME_OBSERVATION_PENDING",
+      "accepts": [
+        "organization-role.conformance"
+      ],
+      "runtime_required_for_consumption": false,
+      "handler": "org-boundary/runtime/organization_role_conformance.py",
+      "transition_authority": "Interlock/InTr",
+      "runtime_reality_authority": "Organization",
+      "direct_repository_mutation": false
+    },
+    {
       "service_id": "gcat-bcat-engine.documentation",
       "repository": "GCAT-BCAT-Engine/Documentation",
       "boundary_role": "INTERNAL_ENDPOINT",
