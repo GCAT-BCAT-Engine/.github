@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import argparse, hashlib, json
+import argparse, hashlib, json, importlib.util
 from pathlib import Path
 KINDS=["INGRESS_ACCEPTED","DISPATCHED","CONSUMED","RESULT_BOUND","EGRESS_EMITTED"]
 def canon(v): return json.dumps(v,sort_keys=True,separators=(",",":")).encode()
@@ -13,11 +13,10 @@ def main():
  if env["destination"]["org"]!=reg["organization"]: raise SystemExit("wrong-destination-org")
  svc=next((s for s in reg["services"] if s["service_id"]==env["destination"]["service"]),None)
  if not svc: raise SystemExit("unknown-service")
- if svc.get("boundary_role")!="BOUNDARY_LOCAL_DIAGNOSTIC": raise SystemExit("endpoint-adapter-not-installed")
+ if svc.get("boundary_role") not in {"BOUNDARY_LOCAL_DIAGNOSTIC","BOUNDARY_LOCAL_CONFORMANCE"}: raise SystemExit("endpoint-adapter-not-installed")
  base={"packet_id":env["packet_id"],"service_id":svc["service_id"],"payload_hash":hashlib.sha256(canon(env["payload"])).hexdigest()}
  receipts=[]; prev=None
  for kind in KINDS:
   subject={**base,"kind":kind,"previous_receipt_id":prev}; rid=hid(kind.lower(),subject); receipts.append({"kind":kind,"receipt_id":rid,"subject":svc["service_id"],"evidence_hash":hashlib.sha256(canon(subject)).hexdigest(),"previous_receipt_id":prev}); prev=rid
- result={"schema_version":reg["organization"].lower().replace(" ","-")+".boundary-execution.v1","packet_id":env["packet_id"],"organization":reg["organization"],"service_id":svc["service_id"],"consumed":True,"application_result":{"echo":env["payload"]},"authority_effect":env["transition"]["authority_effect"],"receipts":receipts,"reconstruction":{"same_execution_required":True,"status":"RECONSTRUCTED","terminal_receipt_id":prev}}
- Path(a.out).parent.mkdir(parents=True,exist_ok=True); Path(a.out).write_text(json.dumps(result,indent=2,sort_keys=True)+"\n"); print(json.dumps({"status":"PASS","terminal_receipt_id":prev}))
+ app={"echo":env["payload"]}\n if svc.get("boundary_role")=="BOUNDARY_LOCAL_CONFORMANCE":\n  hp=Path(svc["handler"]); spec=importlib.util.spec_from_file_location("organization_role_conformance",hp); mod=importlib.util.module_from_spec(spec); spec.loader.exec_module(mod); app=mod.evaluate(env["payload"])\n result={"schema_version":reg["organization"].lower().replace(" ","-")+".boundary-execution.v1","packet_id":env["packet_id"],"organization":reg["organization"],"service_id":svc["service_id"],"consumed":True,"application_result":app,"authority_effect":env["transition"]["authority_effect"],"receipts":receipts,"reconstruction":{"same_execution_required":True,"status":"RECONSTRUCTED","terminal_receipt_id":prev}}\n Path(a.out).parent.mkdir(parents=True,exist_ok=True); Path(a.out).write_text(json.dumps(result,indent=2,sort_keys=True)+"\n"); print(json.dumps({"status":"PASS","terminal_receipt_id":prev}))
 if __name__=="__main__": main()

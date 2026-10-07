@@ -1,0 +1,27 @@
+{
+  "schema": "stegverse.organization-role-runtime-reality-deployment/v1",
+  "declaration_id": "ORGANIZATION-ROLE-RUNTIME-REALITY-DEPLOYMENT-001",
+  "organization": "GCAT-BCAT-Engine",
+  "declared_on": "2026-10-07",
+  "declared_version": "org-role-2026-10-07",
+  "evidence_class": "SOURCE_IMPLEMENTED",
+  "authority_effect": "NONE_DECLARATION_ONLY",
+  "deployment_scope": "THIS_ORGANIZATION_ONLY",
+  "runtime_reality_authority": "Organization",
+  "transition_authority": "Interlock/InTr",
+  "reality_locus": "ORGANIZATION_LEDGER_ROOT",
+  "write_mode": "MANIFEST_DIRECTED_APPEND",
+  "actions_by_manifest_required": true,
+  "external_machine_awaiting_allowed": false,
+  "receiver_unavailable": "DURABLE_QUEUE_OR_EVENT_EPHEMERAL_MATERIALIZATION",
+  "runtime_migration": {
+    "state": "UNOBSERVED",
+    "may_infer_from_repository_state": false
+  },
+  "conformance": {
+    "service_id": "gcat-bcat-engine.organization-role-conformance",
+    "ingress": "org-boundary/runtime/intr_transport.py",
+    "processor": "org-boundary/runtime/process_boundary.py",
+    "direct_repository_mutation": false
+  }
+}

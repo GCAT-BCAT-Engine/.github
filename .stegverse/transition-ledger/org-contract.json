@@ -1,0 +1,21 @@
+{
+  "schema": "stegverse.organization-transition-ledger-contract/v1",
+  "organization": "GCAT-BCAT-Engine",
+  "runtime_reality_authority": "Organization",
+  "transition_authority": "Interlock/InTr",
+  "credential_authority": "TV/TVC",
+  "write_mode": "MANIFEST_DIRECTED_APPEND",
+  "organization_ledger_root": "ORGANIZATION_LEDGER_ROOT",
+  "consumes": [
+    "repository_source_evidence",
+    "canonical_state_transition_receipts"
+  ],
+  "emits": "organization_receipt",
+  "propagation_role": "RELEASED_ORGANIZATION_BATCH_RECEIPT_RECORDER",
+  "propagation_gates_organization_runtime_reality": false,
+  "receiver_unavailable": "DURABLE_QUEUE_OR_EVENT_EPHEMERAL_MATERIALIZATION",
+  "always_on_receiver_required": false,
+  "direct_repository_mutation_authority": false,
+  "runtime_migration_inferred_from_source": false,
+  "declaration_id": "ORGANIZATION-ROLE-RUNTIME-REALITY-DEPLOYMENT-001"
+}
