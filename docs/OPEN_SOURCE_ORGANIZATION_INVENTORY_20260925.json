@@ -134,6 +134,6 @@
     "core-lite root contains MIT text, but this is GCAT-BCAT-Engine/core-lite, not SDK-pinned Data-Continuation/core-lite.",
     "core-full and core-addons have restrictive custom root license text; addon modules may have independent license scopes.",
     "Root LICENSE missing is not proof no file-level or historical license exists.",
-    "No mutation to existing licenses, release, InTr authority, Master Records or rights-holder grants."
+    "No mutation to existing licenses, release, InTr authority, Master Records organization records or rights-holder grants."
   ]
 }
