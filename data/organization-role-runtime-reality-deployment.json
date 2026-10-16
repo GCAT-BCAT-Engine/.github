@@ -9,7 +9,7 @@
   "deployment_scope": "THIS_ORGANIZATION_ONLY",
   "runtime_reality_authority": "Organization",
   "transition_authority": "Interlock/InTr",
-  "reality_locus": "ORGANIZATION_LEDGER_ROOT",
+  "reality_locus": "refs/stegverse/organization-ledger",
   "write_mode": "MANIFEST_DIRECTED_APPEND",
   "actions_by_manifest_required": true,
   "external_machine_awaiting_allowed": false,

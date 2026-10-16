@@ -73,11 +73,22 @@ second federation-crossing receipt for the same frame. A refusal at this
 address is raised, not swallowed, because the operation records its own
 refusal when it is the operation that ran.
 
-This repository did not already have a repository-ledger or organization-ledger
-writer. Both levels are appended by `resident-runtime/dual_ledger.py`. The
-binding names `append_organization`. The roots are `STEGVERSE_REPO_LEDGER_ROOT`
-and `STEGVERSE_ORG_LEDGER_ROOT`. A run that leaves those unset does not choose
-a default durable location.
+Both levels are appended by `resident-runtime/dual_ledger.py`, which delegates
+to `.stegverse/transition-ledger/emit.py` and
+`resident-runtime/aggregate_repo_transition.py`. The binding names
+`aggregate_repo_transition.py::append`. The roots are `STEGVERSE_REPO_LEDGER_ROOT`
+and `STEGVERSE_ORG_LEDGER_ROOT`. A plain path is a POSIX store. The designated
+published ref is `refs/stegverse/organization-ledger` in this repository. The
+repository chain is the subtree `repository-ledger/GCAT-BCAT-Engine/.github`
+of that same ref. A run that leaves the roots unset does not choose a default
+durable location.
+
+`self_close` records a diagnostic this organization addresses to its own
+`gcat-bcat-engine.intr-destination`. `organization-ledger-transition.yml`
+`workflow_dispatch` is the run that appends that pair, fast-forward pushes
+the ref, and reads both receipts back, including `communication_id`. The
+validation job redirects the roots. A redirected store is not the published
+ref.
 
 Emit and close for this capability live in
 `resident-runtime/organization_egress_boundary.py`. That module does not add a
