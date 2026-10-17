@@ -1,0 +1,42 @@
+{
+  "authority_effect": "NONE",
+  "evidence": {
+    "admission_authority_constraint": "CONSTRAINT_VARIABLE",
+    "authority_effect": "NONE_DIAGNOSTIC_ACK_ONLY",
+    "communication_id": "intr-selfclose-GCAT-BCAT-Engine-20261017",
+    "disposition": "ALLOW",
+    "disposition_role": "TRANSITION_EVIDENCE_ONLY",
+    "execution_authority_constraint": "CONSTRAINT_VARIABLE",
+    "operation": "DIAGNOSTIC_CROSSING",
+    "owner_repository": "GCAT-BCAT-Engine/.github",
+    "packet_id": "intr-destination-self-closure:intr-selfclose-GCAT-BCAT-Engine-20261017",
+    "payload_schema": "stegverse.org-intr-destination-diagnostic/v1",
+    "payload_sha256": "sha256:0354071b0c7446a99dfe28f06c3cad11e3fbc4df2574bcc9bbd6f7355e017693",
+    "profile_id": "intr-destination",
+    "profile_name": "InTr:Destination",
+    "purpose_specific_route": false,
+    "receiving_operation": "ORGANIZATION_INTR_DESTINATION_INGRESS",
+    "routing_authority_constraint": "CONSTRAINT_VARIABLE",
+    "selects_processing": false,
+    "standing_rechecked_here": false,
+    "time_constraint": "CONSTRAINT_VARIABLE"
+  },
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 2494976,
+    "progression_dependency": "OSCILLATOR_ONLY",
+    "sampled_unix_ns": 1792205718002494976
+  },
+  "predecessor_state_sha256": "sha256:0354071b0c7446a99dfe28f06c3cad11e3fbc4df2574bcc9bbd6f7355e017693",
+  "previous_receipt_sha256": null,
+  "receipt_sha256": "sha256:ed4fe98da809513c1047c77581ff2f0e2fe801cc64d138a84813f78207c508ef",
+  "repository": "GCAT-BCAT-Engine/.github",
+  "schema": "stegverse.repo-transition-receipt/v1",
+  "successor_state_sha256": "sha256:0f70cf1e8975beec1fbcb441d3fe2d78458d088cf82ff26f22e071164caaf041",
+  "transition_class": "ORGANIZATION_INTR_DESTINATION_INGRESS",
+  "transition_id": "ORGANIZATION_INTR_DESTINATION_INGRESS:intr-destination-self-closure:intr-selfclose-GCAT-BCAT-Engine-20261017"
+}
