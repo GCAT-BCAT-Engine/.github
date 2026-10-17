@@ -28,7 +28,7 @@
           "address_is_resolvable_from_the_service_registry": true,
           "selects_processing_at_the_capability_address": false,
           "admission": "resident-runtime/intr_destination_ingress.py::receive",
-          "receipt_append": "resident-runtime/dual_ledger.py::append_organization",
+          "receipt_append": "resident-runtime/aggregate_repo_transition.py::append",
           "emits": "stegverse.organization-transition-receipt/v1",
           "transport": "INTERLOCK_INTR",
           "address_form": "REPOSITORY_OWNED_OPERATION_NOT_HOST_OR_URL",

@@ -20,6 +20,11 @@ baseline does not declare the profile, and the canonical StegOS connector
 registry was not readable from the change that added it, so this repository
 does not claim StegOS already named it.
 
+``self_close`` builds a diagnostic for this organization's own
+``intr-destination`` and calls ``receive``. Both ledger levels append through
+the repository emitter and the organization aggregator. A workflow_dispatch
+run is what publishes those receipts on ``refs/stegverse/organization-ledger``.
+
 Authority and time are constraint variables. The address did not select a
 processor. The disposition is transition evidence only.
 """
@@ -44,6 +49,7 @@ PROFILE_NAME = "InTr:Destination"
 OPERATION = "DIAGNOSTIC_CROSSING"
 PAYLOAD_SCHEMA = "stegverse.org-intr-destination-diagnostic/v1"
 RESULT_SCHEMA = "stegverse.org-intr-destination-result/v1"
+ADDRESSED_SERVICE = "gcat-bcat-engine.intr-destination"
 COMMUNICATION_CLASS = "ecosystem.communication"
 ALLOW = "ALLOW"
 DENY = "DENY"
@@ -219,6 +225,33 @@ def _recorded(disposition: str, payload: Any, packet_id: str, hb_epoch: int | No
     return _result(evidence, appended, replayed=replayed, received=disposition == ALLOW)
 
 
+def self_close(communication_id: str, *, registry: Mapping[str, Any],
+               packet_id: str | None = None, hb_epoch: int | None = None) -> dict[str, Any]:
+    """Record an intr-destination diagnostic this organization addresses to itself.
+
+    The payload is the same diagnostic ``receive`` acknowledges. It does not
+    enumerate peers and it does not publish a mesh. ``communication_id`` is
+    copied into the repository evidence and the organization boundary evidence.
+    """
+    if not isinstance(communication_id, str) or not communication_id.strip():
+        raise ValueError("communication_id_required")
+    if any(ord(character) < 32 or ord(character) > 126 for character in communication_id):
+        raise ValueError("communication_id_not_printable")
+    payload = {
+        "message_class": COMMUNICATION_CLASS,
+        "communication_id": communication_id,
+        "subject": "purpose-neutral mesh diagnostic",
+        "body": {"schema": PAYLOAD_SCHEMA, "probe": "diagnostic-self-closure"},
+    }
+    result = receive(
+        payload, registry=registry,
+        packet_id=packet_id or ("intr-destination-self-closure:" + communication_id),
+        hb_epoch=hb_epoch)
+    result["self_closure"] = True
+    result["addressed_service"] = ADDRESSED_SERVICE
+    return result
+
+
 def receive(payload: Any, *, registry: Mapping[str, Any], standing: Mapping[str, Any] | None = None,
             packet_id: str = "organization-intr-destination",
             hb_epoch: int | None = None, mesh_root: Path | None = None) -> dict[str, Any]:
@@ -242,16 +275,29 @@ def receive(payload: Any, *, registry: Mapping[str, Any], standing: Mapping[str,
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--payload", type=Path, required=True)
+    parser.add_argument("--payload", type=Path)
+    parser.add_argument("--self-close", action="store_true",
+                        help="acknowledge a diagnostic this organization addresses to itself")
+    parser.add_argument("--communication-id")
     parser.add_argument("--registry", type=Path, required=True)
-    parser.add_argument("--packet-id", default="organization-intr-destination")
+    parser.add_argument("--packet-id", default=None)
     parser.add_argument("--hb-epoch", type=int, default=None)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
-    result = receive(
-        json.loads(args.payload.read_text(encoding="utf-8")),
-        registry=json.loads(args.registry.read_text(encoding="utf-8")),
-        packet_id=args.packet_id, hb_epoch=args.hb_epoch)
+    registry = json.loads(args.registry.read_text(encoding="utf-8"))
+    if args.self_close:
+        if not args.communication_id:
+            parser.error("--self-close requires --communication-id")
+        result = self_close(args.communication_id, registry=registry,
+                            packet_id=args.packet_id, hb_epoch=args.hb_epoch)
+    elif args.payload is not None:
+        result = receive(
+            json.loads(args.payload.read_text(encoding="utf-8")),
+            registry=registry,
+            packet_id=args.packet_id or "organization-intr-destination",
+            hb_epoch=args.hb_epoch)
+    else:
+        parser.error("one of --payload or --self-close is required")
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
