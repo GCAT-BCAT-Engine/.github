@@ -2206,11 +2206,14 @@ class ScanGuardTests(CopiedRepository):
 
     def test_malformed_files_do_not_block_the_cycle(self):
         services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
-        self.publish(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "behind-malformed"}, "probe-behind-malformed")
+        self.publish(ADDRESS, diagnostic("probe-behind-malformed"), "probe-behind-malformed")
         directory = self.mesh / "frames.d"
         (directory / "0-malformed.json").write_text("{not json", encoding="utf-8")
         (directory / "1-not-an-object.json").write_text("[1, 2]", encoding="utf-8")
         (directory / "2-not-utf8.json").write_bytes(b"\xff\xfe\x00")
+        (directory / "3-oversized.json").write_text(
+            json.dumps({"pad": "x" * kernel.MAX_CARRIER_FRAME_BYTES}), encoding="utf-8")
+        (directory / "4-read-error.json").mkdir()
         cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
             "federation_cycle_scan", self.copy / "resident-runtime/federation_cycle.py"))
         cycle.__spec__.loader.exec_module(cycle)
@@ -2218,14 +2221,26 @@ class ScanGuardTests(CopiedRepository):
             self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
         latest = self.copy / "resident-runtime/federation/latest-cycle.json"
         record = json.loads(latest.read_text(encoding="utf-8"))
-        self.assertEqual((record["frames_seen"], record["frames_consumed"], record["frames_refused"]), (4, 1, 3))
+        self.assertEqual((record["frames_seen"], record["frames_consumed"], record["frames_refused"]), (6, 1, 5))
         markers = {json.loads(path.read_text(encoding="utf-8"))["frame_name"]: json.loads(path.read_text(encoding="utf-8"))
                    for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json")}
-        for name in ("0-malformed.json", "1-not-an-object.json", "2-not-utf8.json"):
+        expected = {"0-malformed.json": "JSONDecodeError", "1-not-an-object.json": "ValueError",
+                    "2-not-utf8.json": "UnicodeDecodeError", "3-oversized.json": "ValueError",
+                    "4-read-error.json": "IsADirectoryError"}
+        for name, exception_class in expected.items():
             self.assertEqual(markers[name]["status"], "REFUSED")
+            self.assertEqual(markers[name]["refusal"]["failed_predicate"], exception_class, name)
             self.assertEqual(markers[name]["refusal"]["refused_failure_code"], "FRAME_INGEST_FAILED")
             for field in SuppliedEpochParsingTests.SIX_FIELDS:
                 self.assertIn(field, markers[name]["refusal"])
+        self.assertIn("size_cap", markers["3-oversized.json"]["refusal"]["detail"])
+        # The valid frame behind them was ledgered; the corrupt files wrote no ledger file.
+        self.assertEqual(markers[next(name for name in markers if name not in expected)]["status"], "CONSUMED")
+        repository = self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+        self.assertEqual([receipt["evidence"]["communication_id"] for receipt in repository],
+                         ["probe-behind-malformed"])
+        self.assertEqual(len(self.receipts("STEGVERSE_ORG_LEDGER_ROOT",
+                                           "stegverse.organization-transition-receipt/v1")), 1)
         with mock.patch("builtins.print"):
             self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
         self.assertEqual(json.loads(latest.read_text(encoding="utf-8"))["frames_seen"], 0)

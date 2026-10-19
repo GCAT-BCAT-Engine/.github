@@ -470,6 +470,9 @@ def publish_frame(frame:dict[str,Any], *, root:Path|None=None)->Path:
     path.write_text(json.dumps(frame,indent=2,sort_keys=True)+"\n")
     return path
 
+#: The declared size cap of one carrier frame file. A larger file is not read.
+MAX_CARRIER_FRAME_BYTES=1_048_576
+
 def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str]|None=None,
                           include_unreadable:bool=False)->list[dict[str,Any]]:
     mesh=(root or federation_root()).resolve()
@@ -482,12 +485,15 @@ def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str
         if path.name in consumed:
             continue
         try:
-            frame=json.loads(path.read_text())
+            if path.stat().st_size>MAX_CARRIER_FRAME_BYTES:
+                raise ValueError("carrier_frame_exceeds_size_cap_"+str(MAX_CARRIER_FRAME_BYTES))
+            frame=json.loads(path.read_bytes().decode("utf-8"))
             if not isinstance(frame,dict):
                 raise ValueError("carrier_frame_not_an_object")
         except (ValueError,UnicodeDecodeError,OSError) as exc:
-            # Unreadable: each file is guarded on its own and offered to a
-            # consuming cycle, which quarantines it by name; it blocks no cycle.
+            # Unreadable, oversized, not UTF-8, not JSON or not an object: each
+            # file is guarded on its own and offered to a consuming cycle, which
+            # quarantines it by name; it blocks no cycle.
             if include_unreadable:
                 out.append({"path":str(path),"frame":None,"load_error":exc})
             continue
