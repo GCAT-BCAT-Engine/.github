@@ -230,7 +230,16 @@ def _recorded(disposition: str, payload: Any, packet_id: str, hb_epoch: int | No
         collided = _evidence(payload, packet_id, FAIL_CLOSED,
                              failed_predicate="ONE_PACKET_ID_BINDS_ONE_DIAGNOSTIC",
                              detail=str(exc))
-        return _result(collided, None, replayed=False, received=False)
+        # A content collision: this packet id already records another
+        # diagnostic. It is refused before any write, six fields; a
+        # byte-identical replay is not a collision and stays idempotent.
+        return {**_result(collided, None, replayed=False, received=False),
+                "failure_code": "LEDGER_RECEIPT_COLLISION",
+                "required_evidence_or_repair": "send the recorded diagnostic unchanged, or use a new packet id",
+                "retry_entrypoint": "resident-runtime/intr_destination_ingress.py::receive",
+                "owning_existing_goal": kernel.HB_EPOCH_OWNING_EXISTING_GOAL,
+                "next_attempt": "nothing was written; a byte-identical replay returns the recorded pair",
+                "consequence_committed": False}
     return _result(evidence, appended, replayed=replayed, received=disposition == ALLOW)
 
 

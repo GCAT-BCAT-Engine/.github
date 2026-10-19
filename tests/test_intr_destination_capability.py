@@ -2490,3 +2490,96 @@ class TransientWriterFaultTests(CopiedRepository):
 
     def test_a_lost_comparison_on_the_organization_append_defers_and_the_replay_lands_once(self):
         self.assert_deferred_then_once(os.environ["STEGVERSE_ORG_LEDGER_ROOT"], "probe-lost-org", 1)
+
+
+class CarriedAdmissionRecordTests(CopiedRepository):
+    """B-P36m propagation (lead 09:00Z): writers verify against the crossing's admission record."""
+
+    def ledger_files(self):
+        return sorted(str(path) for name in self.LEDGER_ROOTS
+                      for path in Path(os.environ[name]).rglob("*") if path.is_file())
+
+    def head(self):
+        return json.loads((Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]) / "HEAD.json").read_text())["receipt_sha256"]
+
+    def admitted_head(self):
+        received = ingress.receive(diagnostic("probe-admission-head"), registry=REGISTRY,
+                                   packet_id="probe-admission-head", hb_epoch=4096)
+        self.assertEqual(received["disposition"], "ALLOW", received.get("detail"))
+        return self.head()
+
+    def test_receipts_after_the_head_moved_in_the_crossing_still_carry_the_admission_head(self):
+        admission = self.admitted_head()
+        provenance = {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admission,
+                      "admission_head_receipt_sha": admission}
+        written = []
+        for packet_id in ("probe-admission-first", "probe-admission-second"):
+            result = ingress.receive(diagnostic(packet_id), registry=REGISTRY, packet_id=packet_id,
+                                     hb_epoch=4096, hb_provenance=provenance)
+            self.assertEqual(result["disposition"], "ALLOW", result.get("detail"))
+            written += [result["repository_receipt_sha256"], result["organization_receipt_sha256"]]
+        # The head moved twice within the crossing; an admission-time check would now refuse.
+        self.assertNotEqual(self.head(), admission)
+        self.assertIsNotNone(kernel.carried_provenance_failure(
+            {"epoch": 4096, "derived_from_clock": False, "source": "ORGANIZATION_LEDGER_HEAD",
+             "head_receipt_sha": admission}))
+        receipts = {receipt["receipt_sha256"]: receipt for receipt in
+                    self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+                    + self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1")}
+        self.assertEqual(len(written), 4)
+        for digest in written:
+            reference = receipts[digest]["hb_reference"]
+            self.assertEqual((reference["source"], reference["head_receipt_sha"]),
+                             ("ORGANIZATION_LEDGER_HEAD", admission))
+            self.assertIs(reference["derived_from_clock"], False)
+            self.assertEqual(reference["epoch"], 4096)
+            self.assertNotIn("admission_head_receipt_sha", reference)
+
+    def test_a_writer_refuses_a_forged_or_unadmitted_head(self):
+        admission = self.admitted_head()
+        before = self.ledger_files()
+        forged = "sha256:" + "f" * 64
+        for provenance in ({"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": forged,
+                            "admission_head_receipt_sha": forged},
+                           {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admission,
+                            "admission_head_receipt_sha": forged},
+                           {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admission}):
+            with self.assertRaises(ValueError) as refused:
+                ingress.receive(diagnostic("probe-forged-writer"), registry=REGISTRY,
+                                packet_id="probe-forged-writer", hb_epoch=4096, hb_provenance=provenance)
+            self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        # The epoch must still be the admitted head's.
+        with self.assertRaises(ValueError) as refused:
+            ingress.receive(diagnostic("probe-epoch-writer"), registry=REGISTRY, packet_id="probe-epoch-writer",
+                            hb_epoch=4097, hb_provenance={"source": "ORGANIZATION_LEDGER_HEAD",
+                                                          "head_receipt_sha": admission,
+                                                          "admission_head_receipt_sha": admission})
+        self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        self.assertEqual(self.ledger_files(), before)
+
+
+class ReceiptCollisionTests(RedirectedLedgers):
+    """09:14Z: a content collision is refused before any write, six fields; a byte-identical replay is idempotent."""
+
+    def ledger_files(self):
+        return sorted(str(path) for name in self.LEDGER_ROOTS if Path(os.environ[name]).exists()
+                      for path in Path(os.environ[name]).rglob("*") if path.is_file())
+
+    def test_a_collision_is_refused_before_any_write_and_a_replay_is_idempotent(self):
+        first = ingress.receive(diagnostic("probe-collision-a"), registry=REGISTRY,
+                                packet_id="probe-collision", hb_epoch=4096)
+        self.assertEqual(first["disposition"], "ALLOW")
+        before = self.ledger_files()
+        replay = ingress.receive(diagnostic("probe-collision-a"), registry=REGISTRY,
+                                 packet_id="probe-collision", hb_epoch=4096)
+        self.assertIs(replay["transition_replayed"], True)
+        self.assertEqual(replay["repository_receipt_sha256"], first["repository_receipt_sha256"])
+        self.assertEqual(self.ledger_files(), before)
+        collided = ingress.receive(diagnostic("probe-collision-b"), registry=REGISTRY,
+                                   packet_id="probe-collision", hb_epoch=4096)
+        self.assertEqual(collided["disposition"], "FAIL_CLOSED")
+        self.assertEqual(collided["failure_code"], "LEDGER_RECEIPT_COLLISION")
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, collided)
+        self.assertIs(collided["consequence_committed"], False)
+        self.assertEqual(self.ledger_files(), before)
