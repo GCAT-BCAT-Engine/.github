@@ -638,8 +638,9 @@ def _run(args) -> dict[str, Any]:
                      mesh_root=args.mesh_root, hb_epoch=args.hb_epoch)
     if args.payload is None or args.standing is None:
         raise SystemExit("emit requires --payload and --standing")
-    standing = json.loads(args.standing.read_text(encoding="utf-8"))
-    payload = json.loads(args.payload.read_text(encoding="utf-8"))
+    standing = kernel.read_json_input(args.standing, argument="--standing", retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+    payload = kernel.read_json_input(args.payload, argument="--payload", retry_entrypoint=EPOCH_RETRY_ENTRYPOINT,
+                                     expect=None)
     return emit(args.destination_organization, payload, standing=standing,
                 capability=args.capability, transition_reference=args.transition_reference,
                 mesh_root=args.mesh_root, hb_epoch=args.hb_epoch)

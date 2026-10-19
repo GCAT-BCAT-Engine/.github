@@ -3091,15 +3091,24 @@ class WriterTraceTests(CopiedRepository):
                 found.append(str(path))
         return sorted(found)
 
-    def invoke(self, main, argv, fail_at=None):
-        """Run one CLI in this process: (exit code, printed lines, os.replace calls)."""
-        real_replace, calls = os.replace, []
+    def invoke(self, main, argv, fail_at=None, fail_after_head=None):
+        """Run one CLI in this process: (exit code, printed lines, os.replace calls).
+
+        `fail_at` faults the Nth os.replace before it lands; `fail_after_head`
+        faults just after the Nth HEAD.json replace has landed (the directory
+        sync step), so HEAD is already published."""
+        real_replace, calls, heads = os.replace, [], []
 
         def replace(*args, **kwargs):
             calls.append(args)
             if fail_at is not None and len(calls) == fail_at:
                 raise OSError(28, "No space left on device")
-            return real_replace(*args, **kwargs)
+            result = real_replace(*args, **kwargs)
+            if str(args[1]).endswith("HEAD.json"):
+                heads.append(args[1])
+                if fail_after_head is not None and len(heads) == fail_after_head:
+                    raise OSError(5, "I/O error syncing the directory after HEAD")
+            return result
 
         with mock.patch("sys.argv", argv), mock.patch("os.replace", side_effect=replace), \
                 mock.patch("builtins.print") as printed:
@@ -3107,6 +3116,7 @@ class WriterTraceTests(CopiedRepository):
                 code = main()
             except SystemExit as exc:
                 code = exc.code
+        self.heads_replaced = len(heads)
         return code, [call.args[0] for call in printed.call_args_list], len(calls)
 
     def assert_each_write_fault_is_six_field_and_resumable(self, load, argv, expected=0):
@@ -3215,6 +3225,220 @@ class WriterTraceTests(CopiedRepository):
             return self.cli("cycle_trace", "resident-runtime/federation_cycle.py")()
         self.assert_each_write_fault_is_six_field_and_resumable(
             load, ["federation_cycle.py", "--hb-epoch", "4096"])
+
+    # F-POST-HEAD (VALIDATOR V-P11): a fault after HEAD's replace landed must not lead the rerun
+    # to a second receipt; the rerun returns the recorded one.
+
+    def assert_post_head_fault_is_idempotent(self, load, argv, prepare=None, same_output=False):
+        self.reset()
+        if prepare:
+            prepare()
+        code, clean_printed, _ = self.invoke(load(), argv)
+        self.assertEqual(code if code is not None else 0, 0)
+        heads = self.heads_replaced
+        self.assertGreater(heads, 0)
+        clean = self.documents()
+        for fail_after_head in range(1, heads + 1):
+            with self.subTest(fail_after_head=fail_after_head):
+                self.reset()
+                if prepare:
+                    prepare()
+                main = load()
+                code, printed, _ = self.invoke(main, argv, fail_after_head=fail_after_head)
+                record = json.loads(printed[-1])
+                refusal = record["deferrals"][0] if code == 0 and record.get("deferrals") else record
+                if code != 0:
+                    self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("WRITER_IO_FAILED", False))
+                    self.assertIn("may already be committed", refusal["next_attempt"])
+                    self.assertNotEqual(refusal["consequence_committed"], False)
+                code, rerun, _ = self.invoke(main, argv)
+                self.assertEqual(code if code is not None else 0, 0)
+                self.assertEqual(self.documents(), clean)
+                if same_output:
+                    self.assertEqual(json.loads(rerun[-1]), json.loads(clean_printed[-1]))
+
+    EMIT_ARGV = ["emit.py", "--transition-id", "probe-post-head", "--transition-class", "CLASS",
+                 "--predecessor-state-sha256", "sha256:" + "a" * 64,
+                 "--successor-state-sha256", "sha256:" + "b" * 64, "--hb-epoch", "4096"]
+
+    def test_post_head_the_repository_emitter_returns_the_recorded_receipt(self):
+        self.assert_post_head_fault_is_idempotent(
+            self.cli("emit_post_head", ".stegverse/transition-ledger/emit.py"), self.EMIT_ARGV, same_output=True)
+        receipts = [r for r in self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+                    if r["transition_id"] == "probe-post-head"]
+        self.assertEqual(len(receipts), 1)
+
+    def source_receipt(self, name, transition_id):
+        path = self.inputs / (name + ".json")
+        if not path.exists():
+            emit = _module("emit_post_head_source", ".stegverse/transition-ledger/emit.py")
+            root = os.environ["STEGVERSE_REPO_LEDGER_ROOT"]
+            os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = str(self.inputs / ("source-ledger-" + name))
+            try:
+                path.write_text(json.dumps(emit.append(
+                    transition_id, "CLASS", "sha256:" + "a" * 64, "sha256:" + "b" * 64, {}, "NONE", 4096)),
+                    encoding="utf-8")
+            finally:
+                os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = root
+        return path
+
+    def aggregate_argv(self, receipt, predecessor):
+        return ["aggregate_repo_transition.py", "--transition-receipt", str(receipt),
+                "--predecessor-org-state-sha256", predecessor,
+                "--successor-org-state-sha256", "sha256:" + "c" * 64, "--hb-epoch", "4096"]
+
+    def org_receipts(self):
+        return self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1")
+
+    def test_post_head_the_organization_aggregate_at_genesis_returns_the_recorded_receipt(self):
+        receipt = self.source_receipt("genesis", "probe-post-head-genesis")
+        self.assert_post_head_fault_is_idempotent(
+            self.cli("aggregate_post_head", "resident-runtime/aggregate_repo_transition.py"),
+            self.aggregate_argv(receipt, "GENESIS"), same_output=True)
+        self.assertEqual(len(self.org_receipts()), 1)
+
+    def test_post_head_the_organization_aggregate_from_head_returns_the_recorded_receipt(self):
+        first = self.source_receipt("first", "probe-post-head-first")
+        second = self.source_receipt("second", "probe-post-head-second")
+        load = self.cli("aggregate_post_head_from", "resident-runtime/aggregate_repo_transition.py")
+
+        def prepare():
+            code, _, _ = self.invoke(load(), self.aggregate_argv(first, "GENESIS"))
+            self.assertIn(code, (None, 0))
+        self.assert_post_head_fault_is_idempotent(load, self.aggregate_argv(second, "FROM_HEAD"),
+                                                  prepare=prepare, same_output=True)
+        self.assertEqual(len(self.org_receipts()), 2)
+
+    def test_post_head_the_ingress_egress_runtime_and_cycle_commands(self):
+        registry = str(self.copy / "org-boundary/registry/services.json")
+        self.assert_post_head_fault_is_idempotent(
+            self.cli("ingress_post_head", "resident-runtime/intr_destination_ingress.py"),
+            ["intr_destination_ingress.py", "--registry", registry,
+             "--payload", str(self.inputs / "payload.json"), "--hb-epoch", "4096",
+             "--out", str(self.out / "receive.json")])
+        self.assert_post_head_fault_is_idempotent(
+            self.cli("egress_post_head", "resident-runtime/organization_egress_boundary.py"),
+            ["organization_egress_boundary.py", "--destination-organization", PEER,
+             "--payload", str(self.inputs / "payload.json"), "--standing", str(self.inputs / "standing.json"),
+             "--capability", PROFILE_ID, "--mesh-root", str(self.mesh), "--hb-epoch", "4096",
+             "--out", str(self.out / "egress.json")])
+
+        def load_cycle():
+            if not (self.mesh / "frames.d").is_dir():
+                self.publish(ADDRESS, diagnostic("probe-post-head-cycle"), "probe-post-head-cycle")
+            return self.cli("cycle_post_head", "resident-runtime/federation_cycle.py")()
+        self.assert_post_head_fault_is_idempotent(load_cycle, ["federation_cycle.py", "--hb-epoch", "4096"])
+
+    def test_a_changed_rerun_of_a_recorded_transition_is_a_terminal_collision(self):
+        load = self.cli("emit_collision", ".stegverse/transition-ledger/emit.py")
+        self.reset()
+        self.assertIn(self.invoke(load(), self.EMIT_ARGV)[0], (None, 0))
+        before = self.documents()
+        changed = self.EMIT_ARGV[:-2] + ["--evidence-json", '{"other": true}', "--hb-epoch", "4096"]
+        code, printed, _ = self.invoke(load(), changed)
+        self.assertEqual(code, 1)
+        refusal = json.loads(printed[-1])
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("LEDGER_RECEIPT_COLLISION", True))
+        self.assertEqual(self.documents(), before)
+
+
+class InputTraceTests(WriterTraceTests):
+    """F-INPUT-TRACE (VALIDATOR V-P11): a missing, unreadable, non-UTF-8, non-JSON or wrong-type input
+    on any CLI argument is a TERMINAL six-field CLI_INPUT_INVALID, non-zero, with nothing written and
+    no traceback. Inputs are read before any write, outside the own-state fault classifier."""
+
+    BAD_INPUTS = ("missing", "directory", "not-utf-8", "not-json", "wrong-type")
+
+    def bad_input(self, kind):
+        path = self.inputs / ("bad-" + kind)
+        if kind == "directory":
+            path.mkdir(exist_ok=True)
+        elif kind == "not-utf-8":
+            path.write_bytes(b"\xff\xfe{")
+        elif kind == "not-json":
+            path.write_text("{not json", encoding="utf-8")
+        elif kind == "wrong-type":
+            path.write_text("[1, 2]", encoding="utf-8")
+        return path
+
+    def bad_inline(self, kind):
+        return {"not-json": "{not json", "wrong-type": "[1, 2]"}.get(kind)
+
+    def assert_terminal_input_refusal(self, load, argv, argument):
+        self.reset()
+        before = self.documents()
+        code, printed, writes = self.invoke(load(), argv)
+        self.assertEqual(code, 1, printed)
+        refusal = json.loads(printed[-1])
+        self.assertEqual((refusal["disposition"], refusal["failure_code"], refusal["terminal"]),
+                         ("FAIL_CLOSED", "CLI_INPUT_INVALID", True))
+        self.assertTrue(refusal["detail"].startswith(argument + ": "), refusal["detail"])
+        for field in ("failed_predicate", "required_evidence_or_repair", "retry_entrypoint",
+                      "owning_existing_goal", "next_attempt"):
+            self.assertTrue(refusal[field], field)
+        self.assertIs(refusal["consequence_committed"], False)
+        self.assertEqual(writes, 0)
+        self.assertEqual(self.documents(), before)
+
+    def each_bad_file(self, load, argv_for, argument, *, any_json=False):
+        for kind in self.BAD_INPUTS:
+            if any_json and kind == "wrong-type":
+                continue
+            with self.subTest(argument=argument, kind=kind):
+                self.assert_terminal_input_refusal(load, argv_for(str(self.bad_input(kind))), argument)
+
+    def each_bad_inline(self, load, argv_for, argument):
+        for kind in ("not-json", "wrong-type"):
+            with self.subTest(argument=argument, kind=kind):
+                self.assert_terminal_input_refusal(load, argv_for(self.bad_inline(kind)), argument)
+
+    def test_the_repository_emitter_inputs(self):
+        load = self.cli("emit_input", ".stegverse/transition-ledger/emit.py")
+        self.each_bad_inline(load, lambda value: self.EMIT_ARGV + ["--evidence-json", value], "--evidence-json")
+
+    def test_the_organization_aggregate_inputs(self):
+        load = self.cli("aggregate_input", "resident-runtime/aggregate_repo_transition.py")
+        good = self.source_receipt("input", "probe-input")
+        for flag in ("--transition-receipt", "--repo-receipt"):
+            self.each_bad_file(load, lambda path: ["aggregate_repo_transition.py", flag, path,
+                                                   "--predecessor-org-state-sha256", "GENESIS",
+                                                   "--successor-org-state-sha256", "sha256:" + "c" * 64,
+                                                   "--hb-epoch", "4096"], flag)
+        self.each_bad_inline(load, lambda value: self.aggregate_argv(good, "GENESIS")
+                             + ["--boundary-evidence-json", value], "--boundary-evidence-json")
+
+    def test_the_ingress_inputs(self):
+        load = self.cli("ingress_input", "resident-runtime/intr_destination_ingress.py")
+        registry = str(self.copy / "org-boundary/registry/services.json")
+        payload = str(self.inputs / "payload.json")
+        self.each_bad_file(load, lambda path: ["intr_destination_ingress.py", "--registry", path,
+                                               "--payload", payload, "--hb-epoch", "4096"], "--registry")
+        self.each_bad_file(load, lambda path: ["intr_destination_ingress.py", "--registry", path,
+                                               "--self-close", "--communication-id", "probe-input",
+                                               "--hb-epoch", "4096"], "--registry")
+        self.each_bad_file(load, lambda path: ["intr_destination_ingress.py", "--registry", registry,
+                                               "--payload", path, "--hb-epoch", "4096"], "--payload", any_json=True)
+
+    def test_the_egress_inputs(self):
+        load = self.cli("egress_input", "resident-runtime/organization_egress_boundary.py")
+        payload, standing = str(self.inputs / "payload.json"), str(self.inputs / "standing.json")
+
+        def argv(payload_path, standing_path):
+            return ["organization_egress_boundary.py", "--destination-organization", PEER,
+                    "--payload", payload_path, "--standing", standing_path, "--capability", PROFILE_ID,
+                    "--mesh-root", str(self.mesh), "--hb-epoch", "4096"]
+        self.each_bad_file(load, lambda path: argv(path, standing), "--payload", any_json=True)
+        self.each_bad_file(load, lambda path: argv(payload, path), "--standing")
+
+    def test_the_ecosystem_publisher_inputs(self):
+        load = self.cli("ecosystem_input", "resident-runtime/ecosystem_control.py")
+        self.each_bad_inline(load, lambda value: ["ecosystem_control.py", "send-message", "--subject", "probe",
+                                                  "--body-json", value, "--hb-epoch", "4096"], "--body-json")
+
+    def test_the_organization_runtime_ingress_input(self):
+        load = lambda: self.runtime().main
+        self.each_bad_file(load, lambda path: ["organization_runtime.py", "ingress", "--file", path,
+                                               "--hb-epoch", "4096"], "--file")
 
 
 class CarriedCrossingAdmissionRecordTests(CopiedRepository):

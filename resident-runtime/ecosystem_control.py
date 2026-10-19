@@ -62,7 +62,7 @@ def _main():
     except K.SuppliedEpochRefused as exc:
         print(json.dumps(exc.refusal,sort_keys=True))
         raise SystemExit(1)
-    body=json.loads(args.body_json)
+    body=K.read_json_input(args.body_json,argument="--body-json",inline=True,retry_entrypoint=RETRY_ENTRYPOINT)
     if os.getenv("STEGVERSE_ORG_FEDERATION_GATEWAY_URL","").strip():
         out=GW.publish_ecosystem_via_gateway(
             repo_root=ROOT,

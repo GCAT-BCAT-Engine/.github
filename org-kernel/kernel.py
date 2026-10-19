@@ -585,7 +585,8 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "carried_provenance_refusal","frame_provenance","admission_id","admission_record","close_admission",
          "ADMISSION_SCHEMA","ingest_or_quarantine","frame_failure_refusal",
          "recorded_response","response_collision_refusal","writer_fault_refusal","cli_refusal",
-         "WRITER_IO_FAILED","WRITER_WRITE_FAILED","control_response_packet_id","request_binding",
+         "WRITER_IO_FAILED","WRITER_WRITE_FAILED","CLI_INPUT_INVALID","InputRefused","input_refusal",
+         "read_json_input","collision_refusal","LEDGER_RECEIPT_COLLISION","control_response_packet_id","request_binding",
          "RESPONSE_ID_COLLISION","ResponseIdCollision","RESPONDING_MESSAGE_CLASSES","write_json_atomic","write_once_json",
          "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED","FRAME_DISPATCH_IO_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
@@ -969,8 +970,11 @@ WRITER_WRITE_FAILED="WRITER_WRITE_FAILED"
 def writer_fault_refusal(exc:BaseException, *, retry_entrypoint:str)->dict[str,Any]:
     """The six-field record a writer CLI prints when its own write faults.
 
-    Not terminal: every ledger and spool write is atomic or replayed
-    byte-identically, so running the same command again completes it once.
+    Not terminal: every ledger and spool write is atomic, and a rerun of the
+    same command is idempotent, so it completes the write once. The fault may
+    have come after a write was already published (for example the directory
+    sync after HEAD's replace), so the record does not claim nothing was
+    written: the rerun returns what is already recorded.
     """
     return {"disposition":"FAIL_CLOSED",
             "failure_code":WRITER_IO_FAILED if isinstance(exc,OSError) else WRITER_WRITE_FAILED,
@@ -980,8 +984,60 @@ def writer_fault_refusal(exc:BaseException, *, retry_entrypoint:str)->dict[str,A
             "required_evidence_or_repair":"this boundary's own storage accepts the write",
             "retry_entrypoint":retry_entrypoint,
             "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
-            "next_attempt":"run the same command again; a write already made is replayed, never doubled",
+            "next_attempt":("the write may already be committed; run the same command again: the rerun is "
+                            "idempotent and returns what is recorded, never a second receipt"),
+            "consequence_committed":"UNKNOWN_RETRY_IS_IDEMPOTENT"}
+
+LEDGER_RECEIPT_COLLISION="LEDGER_RECEIPT_COLLISION"
+
+def collision_refusal(identity:str, *, retry_entrypoint:str)->dict[str,Any]:
+    """The terminal six-field record of a rerun that names a recorded transition with other content."""
+    return {"disposition":"FAIL_CLOSED","failure_code":LEDGER_RECEIPT_COLLISION,"terminal":True,
+            "failed_predicate":"ONE_TRANSITION_IDENTITY_BINDS_ONE_RECEIPT",
+            "detail":identity+" is already recorded with other content",
+            "required_evidence_or_repair":"rerun the recorded transition unchanged, or use a new identity",
+            "retry_entrypoint":retry_entrypoint,
+            "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt":"nothing was written; the recorded receipt stands",
             "consequence_committed":False}
+
+CLI_INPUT_INVALID="CLI_INPUT_INVALID"
+
+class InputRefused(ValueError):
+    """A CLI input that cannot be read as the JSON document it must be; carries the six-field refusal."""
+    def __init__(self, refusal:dict[str,Any]):
+        super().__init__(refusal["detail"]); self.refusal=refusal
+
+def input_refusal(argument:str, detail:str, *, retry_entrypoint:str)->dict[str,Any]:
+    """The terminal six-field record of a bad CLI input: the caller's fault, and nothing was written."""
+    return {"disposition":"FAIL_CLOSED","failure_code":CLI_INPUT_INVALID,"terminal":True,
+            "failed_predicate":"EVERY_CLI_INPUT_IS_A_READABLE_JSON_DOCUMENT_OF_ITS_TYPE",
+            "detail":argument+": "+detail,
+            "required_evidence_or_repair":"supply "+argument+" as readable UTF-8 JSON of the expected type",
+            "retry_entrypoint":retry_entrypoint,
+            "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt":"nothing was read past the input and nothing was written; fix the input and run again",
+            "consequence_committed":False}
+
+def read_json_input(source:Any, *, argument:str, retry_entrypoint:str, inline:bool=False,
+                    expect:type|None=dict)->Any:
+    """Read one CLI input -- a file path, or `inline` JSON text -- before any write, or InputRefused.
+
+    A missing or unreadable file, bytes that are not UTF-8, text that is not
+    JSON, and a document of the wrong top-level type are each the terminal
+    CLI_INPUT_INVALID, never an OSError for the own-state fault classifier.
+    """
+    try:
+        raw=source.encode("utf-8") if inline else Path(source).read_bytes()
+        value=json.loads(raw.decode("utf-8"))
+    except (OSError,UnicodeError,ValueError) as exc:
+        raise InputRefused(input_refusal(argument,type(exc).__name__+": "+str(exc),
+                                         retry_entrypoint=retry_entrypoint)) from None
+    if expect is not None and not isinstance(value,expect):
+        raise InputRefused(input_refusal(argument,"the document is a "+type(value).__name__+", not a JSON "
+                                         +("object" if expect is dict else expect.__name__),
+                                         retry_entrypoint=retry_entrypoint))
+    return value
 
 def cli_refusal(exc:BaseException, *, retry_entrypoint:str)->dict[str,Any]|None:
     """What a writer CLI prints for an exception, or None to re-raise it.

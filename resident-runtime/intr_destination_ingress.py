@@ -313,14 +313,23 @@ def main() -> int:
     except kernel.SuppliedEpochRefused as exc:
         print(json.dumps(exc.refusal, sort_keys=True))
         return 1
-    registry = json.loads(args.registry.read_text(encoding="utf-8"))
+    # Every input is read before any write and outside the own-state fault
+    # classifier; a bad one is the caller's terminal fault.
+    try:
+        registry = kernel.read_json_input(args.registry, argument="--registry",
+                                          retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+        payload = (None if args.self_close else kernel.read_json_input(
+            args.payload, argument="--payload", retry_entrypoint=EPOCH_RETRY_ENTRYPOINT, expect=None))
+    except kernel.InputRefused as exc:
+        print(json.dumps(exc.refusal, sort_keys=True))
+        return 1
     try:
         if args.self_close:
             result = self_close(args.communication_id, registry=registry,
                                 packet_id=args.packet_id, hb_epoch=hb_epoch)
         else:
             result = receive(
-                json.loads(args.payload.read_text(encoding="utf-8")),
+                payload,
                 registry=registry,
                 packet_id=args.packet_id or "organization-intr-destination",
                 hb_epoch=hb_epoch)

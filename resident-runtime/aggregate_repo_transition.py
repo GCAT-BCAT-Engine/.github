@@ -391,6 +391,18 @@ def append(source_receipt, org_transition_class, predecessor_state, successor_st
         with guard:
             expected_head = target.get(HEAD_KEY)
             previous = (expected_head or {}).get("receipt_sha256")
+            # A source receipt is consumed once. With `idempotent` the chain is
+            # read at the HEAD this attempt compares against, before the
+            # predecessor is resolved: a receipt already consuming this exact
+            # source is returned instead of a second one minted (a GENESIS rerun
+            # whose append already committed included), and one consuming it
+            # under another class is a collision.
+            if idempotent:
+                prior = recorded(target, expected_head, source["source_transition_sha256"])
+                if prior is not None:
+                    if prior.get("org_transition_class") != org_transition_class:
+                        raise ValueError("ledger_receipt_collision")
+                    return prior
             # Resolved against the HEAD this attempt will compare against, so a
             # retry after a lost comparison re-resolves rather than reusing it.
             if predecessor_state == FROM_HEAD:
@@ -424,16 +436,6 @@ def append(source_receipt, org_transition_class, predecessor_state, successor_st
             # from a torn attempt of this same append; the rewrite is
             # byte-identical, so only they are tolerated.
             _validate_existing_head(target, pending=frozenset({key, *retained}))
-            # A source receipt is consumed once. With `idempotent` the chain is
-            # read at the HEAD this attempt compares against: a receipt already
-            # consuming this exact source is returned instead of a second one
-            # minted, and one consuming it under another class is a collision.
-            if idempotent:
-                prior = recorded(target, expected_head, source["source_transition_sha256"])
-                if prior is not None:
-                    if prior.get("org_transition_class") != org_transition_class:
-                        raise ValueError("ledger_receipt_collision")
-                    return prior
         new_head = {
             "organization": C["organization"],
             "receipt_sha256": digest,
@@ -460,20 +462,36 @@ def main():
     source_path = args.transition_receipt or args.repo_receipt
     if not source_path:
         raise SystemExit("transition receipt required")
-    receipt = load(source_path)
+    # Every input is read before any write; a bad one is the caller's terminal fault.
+    try:
+        receipt = kernel.read_json_input(
+            source_path, argument="--transition-receipt" if args.transition_receipt else "--repo-receipt",
+            retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+        boundary_evidence = kernel.read_json_input(
+            args.boundary_evidence_json, argument="--boundary-evidence-json", inline=True,
+            retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+    except kernel.InputRefused as exc:
+        print(json.dumps(exc.refusal, sort_keys=True))
+        raise SystemExit(1)
     default_class = ("REPO_STATE_PROPAGATION"
                      if receipt.get("schema") == "stegverse.repo-transition-receipt/v1"
                      else "ORGANIZATION_STATE_TRANSITION")
     try:
         result = append(receipt, args.org_transition_class or default_class,
                         args.predecessor_org_state_sha256, args.successor_org_state_sha256,
-                        json.loads(args.boundary_evidence_json), args.authority_effect,
-                        hb_epoch=args.hb_epoch)
+                        boundary_evidence, args.authority_effect,
+                        hb_epoch=args.hb_epoch, idempotent=True)
     except LedgerLocationRequired as exc:
         print(json.dumps(location_refusal(exc), sort_keys=True))
         raise SystemExit(1)
     except OrgLedgerEpochRefused as exc:
         print(json.dumps(exc.refusal, sort_keys=True))
+        raise SystemExit(1)
+    except ValueError as exc:
+        if str(exc) != "ledger_receipt_collision":
+            raise
+        print(json.dumps(kernel.collision_refusal(source_path, retry_entrypoint=EPOCH_RETRY_ENTRYPOINT),
+                         sort_keys=True))
         raise SystemExit(1)
     except (LedgerWriteFailed, OSError) as exc:
         # This boundary's own write fault: non-terminal six-field, never a traceback.
