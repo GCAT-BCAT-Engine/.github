@@ -2043,6 +2043,7 @@ class InTreeDispatcherTests(CopiedRepository):
             dispatcher = ROOT / binding["dispatcher"]
             self.assertTrue(dispatcher.is_file(), binding["dispatcher"])
             self.assertEqual(dispatcher.parent, ROOT / ".github/workflows")
+            self.assertEqual(binding["dispatcher_authority_effect"], "NONE")
             text = dispatcher.read_text(encoding="utf-8")
             self.assertEqual(_workflow_triggers(text), ["workflow_dispatch"])
             self.assertRegex(text, r"hb_epoch:\n\s+description: [^\n]+\n\s+required: true")
@@ -2106,3 +2107,93 @@ class InTreeDispatcherTests(CopiedRepository):
                     self.assertTrue(dispatch_only or "if: github.event_name == 'workflow_dispatch'" in job, where)
                     self.assertIn("writer_epoch_refusal", job[:call.start()], where)
                     self.assertIn("--hb-epoch", job, where)
+
+
+class ClockFrameCarriedClaimTests(CopiedRepository):
+    """G5-R (VALIDATOR 6262338014): a CLOCK frame that asserts a CARRIED claim is refused, never consumed."""
+
+    FORGED = "sha256:" + "f" * 64
+
+    def frame(self, service, payload, packet_id, reference):
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=service, payload=payload,
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+            packet_id=packet_id)
+        frame = kernel.carrier_frame(packet, epoch=4096)
+        body = dict(frame)
+        body.pop("frame_sha256")
+        body["heartbeat_reference"] = {"epoch": 4096, "source": "ORGANIZATION_LEDGER_HEAD",
+                                       "head_receipt_sha": self.FORGED, **reference}
+        return {**body, "frame_sha256": kernel.sha(body)}
+
+    CLOCK_FORMS = ({"sampled_unix_ns": 1}, {"derived_from_clock": True},
+                   {"derived_from_clock": True, "sampled_unix_ns": 1})
+
+    def routes(self):
+        services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
+        return ((services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "carried-clock"}),
+                (services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-carried-clock-work",
+                                                      "message_class": "ecosystem.work.request",
+                                                      "subject": "probe", "body": {}}),
+                (services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"communication_id": "probe-carried-clock-comm",
+                                                         "message_class": "ecosystem.communication",
+                                                         "subject": "probe", "body": {}}))
+
+    def written(self):
+        files = set()
+        for root in (self.copy, *(Path(os.environ[name]) for name in self.LEDGER_ROOTS)):
+            if root.exists():
+                files.update(str(path) for path in root.rglob("*")
+                             if path.is_file() and "__pycache__" not in path.parts)
+        return files
+
+    def test_a_clock_frame_asserting_a_claim_is_refused_with_nothing_written(self):
+        before = self.written()
+        for form_index, form in enumerate(self.CLOCK_FORMS):
+            for route_index, (service, payload) in enumerate(self.routes()):
+                with self.assertRaises(kernel.SuppliedEpochRefused) as refused:
+                    kernel.ingest_frame(self.copy, self.frame(
+                        service, payload, "probe-cc-" + str(form_index) + "-" + str(route_index), form),
+                        mesh_root=self.mesh)
+                self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+                for field in SuppliedEpochParsingTests.SIX_FIELDS:
+                    self.assertIn(field, refused.exception.refusal)
+        self.assertEqual(self.written(), before)
+
+    def test_a_cycle_quarantines_them_and_writes_no_intake(self):
+        for form_index, form in enumerate(self.CLOCK_FORMS):
+            for route_index, (service, payload) in enumerate(self.routes()):
+                kernel.publish_frame(self.frame(service, payload,
+                                                "probe-cycle-cc-" + str(form_index) + "-" + str(route_index),
+                                                form), root=self.mesh)
+        cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_g5r", self.copy / "resident-runtime/federation_cycle.py"))
+        cycle.__spec__.loader.exec_module(cycle)
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        markers = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json")]
+        self.assertEqual(len(markers), len(self.CLOCK_FORMS) * len(self.routes()))
+        for marker in markers:
+            self.assertEqual(marker["status"], "REFUSED")
+            self.assertEqual(marker["refusal"]["refused_failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        inbox = self.copy / "resident-runtime/control/inbox"
+        self.assertFalse(inbox.exists() and any(inbox.iterdir()))
+        self.assertEqual([path for name in self.LEDGER_ROOTS
+                          for path in Path(os.environ[name]).rglob("*") if path.is_file()], [])
+
+    def test_collection_skips_a_frame_whose_digests_do_not_bind_its_packet(self):
+        directory = self.mesh / "frames.d"
+        directory.mkdir(parents=True)
+        (directory / "unreadable.json").write_text("{not json", encoding="utf-8")
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=kernel.organization_slug(THIS) + ".org-control",
+            payload={"communication_id": "probe-collect", "message_class": "ecosystem.communication.ack",
+                     "body": {}}, transition_reference="probe", authority_effect="NONE",
+            packet_id="probe-collect")
+        frame = kernel.carrier_frame(packet, epoch=4096)
+        kernel.publish_frame({**frame, "packet_sha256": "sha256:" + "0" * 64}, root=self.mesh)
+        self.assertEqual(kernel.collect_ecosystem_responses(THIS, "probe-collect", mesh_root=self.mesh)
+                         ["response_count"], 0)

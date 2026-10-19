@@ -344,9 +344,17 @@ def carried_frame_epoch(frame:dict[str,Any])->int|None:
     the organization ledger head. No clock is read.
     """
     reference=frame.get("heartbeat_reference")
-    if isinstance(reference,dict) and (reference.get("derived_from_clock") is True
-                                       or ("derived_from_clock" not in reference
-                                           and "sampled_unix_ns" in reference)):
+    clock=isinstance(reference,dict) and (reference.get("derived_from_clock") is True
+                                          or ("derived_from_clock" not in reference
+                                              and "sampled_unix_ns" in reference))
+    # A CARRIED claim is checked before the CLOCK path, whatever the clock
+    # marker: a CLOCK reference cannot carry one, so asserting it is refused,
+    # never silently dropped.
+    if clock and any(field in reference for field in CARRIED_PROVENANCE_FIELDS):
+        raise SuppliedEpochRefused(carried_provenance_refusal(
+            "a CLOCK heartbeat reference asserts CARRIED provenance; only a supplied (derived_from_clock false) "
+            "reference may carry a claim",INGEST_EPOCH_RETRY_ENTRYPOINT))
+    if clock:
         malformed=writer_epoch_refusal(reference.get("epoch"),retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT)
         if malformed is not None:
             raise SuppliedEpochRefused(malformed)
@@ -462,7 +470,8 @@ def publish_frame(frame:dict[str,Any], *, root:Path|None=None)->Path:
     path.write_text(json.dumps(frame,indent=2,sort_keys=True)+"\n")
     return path
 
-def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str]|None=None)->list[dict[str,Any]]:
+def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str]|None=None,
+                          include_unreadable:bool=False)->list[dict[str,Any]]:
     mesh=(root or federation_root()).resolve()
     frames=mesh/"frames.d"
     if not frames.exists():
@@ -475,8 +484,9 @@ def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str
         try:
             frame=json.loads(path.read_text())
         except ValueError:
-            # Unreadable: offered once, so the consuming cycle makes it terminal.
-            out.append({"path":str(path),"frame":None})
+            # Unreadable: offered to a consuming cycle, which makes it terminal.
+            if include_unreadable:
+                out.append({"path":str(path),"frame":None})
             continue
         if isinstance(frame,dict) and frame.get("destination_org")==organization:
             out.append({"path":str(path),"frame":frame})
@@ -798,7 +808,7 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
     durable_seen=federation_seen_frame_names(repo_root)
     effective_seen=set(seen or set())|durable_seen
     out=[]
-    for item in scan_addressed_frames(organization,root=mesh_root,seen=effective_seen):
+    for item in scan_addressed_frames(organization,root=mesh_root,seen=effective_seen,include_unreadable=True):
         # One frame's failure, of any kind, is that frame's terminal refusal.
         packet,result=ingest_or_quarantine(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
         message_class=((packet or {}).get("payload") or {}).get("message_class")
@@ -818,7 +828,11 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
 def collect_ecosystem_responses(origin_org:str, communication_id:str, *, mesh_root:Path|None=None)->dict[str,Any]:
     responses=[]
     for item in scan_addressed_frames(origin_org,root=mesh_root):
-        packet=recover_packet(item["frame"])
+        try:
+            packet=recover_packet(item["frame"])
+        except (ValueError,KeyError,TypeError):
+            # A frame whose digests do not bind its packet is not a response.
+            continue
         payload=packet.get("payload") or {}
         if payload.get("communication_id")!=communication_id:
             continue
