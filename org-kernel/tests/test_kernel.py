@@ -13,7 +13,7 @@ with tempfile.TemporaryDirectory() as td:
  "evidence":{"ingress_receipt":None,"dispatch_receipt":None,"consumption_receipt":None,"egress_receipt":None,"reconstruction_reference":None}}
  clock_frame=k.carrier_frame(packet,now_ns=k.HB_ANCHOR_UNIX_NS+1_000_000_000)
  try: k.ingest_frame(root,clock_frame); raise AssertionError("a clock-sampled frame was consumed")
- except k.SuppliedEpochRefused as exc: assert exc.refusal["failure_code"]=="HB_EPOCH_PROVENANCE_UNMARKED"
+ except k.SuppliedEpochRefused as exc: assert exc.refusal["failure_code"]=="HB_EPOCH_INVALID"
  frame=k.carrier_frame(packet,epoch=4096)
  recovered=k.recover_packet(frame); assert recovered==packet
  out=k.ingest_frame(root,frame); assert out["status"]=="CONSUMED"; assert out["execution_result"]["reconstruction"]["status"]=="RECONSTRUCTED"

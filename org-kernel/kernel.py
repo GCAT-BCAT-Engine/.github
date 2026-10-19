@@ -70,10 +70,10 @@ def supplied_epoch_failure(hb_epoch: Any, reference: Any = None) -> tuple[str, s
     must be ASCII [0-9]+ only -- an int is read as its decimal text; a bool, a
     float or anything coerced ('+33', ' 33', '3_3', '33.0') is refused -- with
     integer value >= 32 (the HB32 anchor). `reference`, the carrier frame's
-    heartbeat reference when there is one, must be an object that carries
-    `derived_from_clock` exactly false and no clock sample; one with the key
-    absent or a `sampled_unix_ns` is HB_EPOCH_PROVENANCE_UNMARKED. Any other
-    failure is HB_EPOCH_INVALID. Returns (failure_code, detail), or None when
+    heartbeat reference when there is one, must be an object. In order: a
+    `derived_from_clock` present and not exactly false is HB_EPOCH_INVALID, a
+    `sampled_unix_ns` is HB_EPOCH_INVALID, and `derived_from_clock` absent is
+    HB_EPOCH_PROVENANCE_UNMARKED. Returns (failure_code, detail), or None when
     the epoch is supplied. No clock is read.
     """
     if reference is not None and not isinstance(reference, dict):
@@ -92,11 +92,14 @@ def supplied_epoch_failure(hb_epoch: Any, reference: Any = None) -> tuple[str, s
         return "HB_EPOCH_INVALID", "hb_epoch " + repr(hb_epoch) + " is not ASCII [0-9]+"
     if int(text) < 32:
         return "HB_EPOCH_INVALID", "hb_epoch " + text + " is below the HB32 anchor (32)"
-    if reference is not None and ("derived_from_clock" not in reference or "sampled_unix_ns" in reference):
-        return "HB_EPOCH_PROVENANCE_UNMARKED", "the carrier's heartbeat reference does not mark its provenance as supplied"
-    if reference is not None and reference["derived_from_clock"] is not False:
+    if reference is not None and "derived_from_clock" in reference \
+            and reference["derived_from_clock"] is not False:
         return "HB_EPOCH_INVALID", ("the carrier's derived_from_clock is not exactly false; "
                                     "a clock-derived epoch is not a supplied one")
+    if reference is not None and "sampled_unix_ns" in reference:
+        return "HB_EPOCH_INVALID", "the carrier's heartbeat reference carries a clock sample; it is not a supplied epoch"
+    if reference is not None and "derived_from_clock" not in reference:
+        return "HB_EPOCH_PROVENANCE_UNMARKED", "the carrier's heartbeat reference does not mark its provenance as supplied"
     return None
 
 class SuppliedEpochRefused(ValueError):
@@ -240,12 +243,61 @@ def persist_outbox(root:Path, frame:dict[str,Any])->Path:
     return path
 
 INGEST_EPOCH_RETRY_ENTRYPOINT="org-kernel/kernel.py::ingest_frame (the carrier frame's heartbeat_reference)"
+CARRIED_PROVENANCE_UNVERIFIED="CARRIED_PROVENANCE_UNVERIFIED"
+CARRIED_PROVENANCE_PREDICATE="CARRIED_PROVENANCE_IS_THE_CURRENT_VERIFIED_ORGANIZATION_HEAD"
+CARRIED_PROVENANCE_SOURCE="ORGANIZATION_LEDGER_HEAD"
+CARRIED_PROVENANCE_FIELDS=("source","head_receipt_sha")
+
+def _ledger_store():
+    path=Path(__file__).resolve().parents[1]/"resident-runtime/ledger_store.py"
+    spec=importlib.util.spec_from_file_location("ledger_store_for_kernel",path)
+    module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+
+def carried_provenance_failure(reference:dict[str,Any])->str|None:
+    """Why a carrier's CARRIED claim does not verify, or None when it makes none or verifies.
+
+    A reference naming `source` or `head_receipt_sha` claims its epoch was read
+    from the organization ledger head. It is verified against that head, read
+    without writing: the source is ORGANIZATION_LEDGER_HEAD, the sha is the
+    current HEAD, the head receipt is bound by its digest, its own reference
+    passes the shared rule, and the epochs agree. A claim is never stripped
+    and the frame accepted as supplied.
+    """
+    if not any(field in reference for field in CARRIED_PROVENANCE_FIELDS):
+        return None
+    if reference.get("source")!=CARRIED_PROVENANCE_SOURCE:
+        return "the carried source "+repr(reference.get("source"))+" is not "+CARRIED_PROVENANCE_SOURCE
+    claimed=reference.get("head_receipt_sha")
+    if not isinstance(claimed,str) or not claimed.startswith("sha256:") or len(claimed)!=71:
+        return "the carried head_receipt_sha is not a sha256 digest"
+    location=os.environ.get("STEGVERSE_ORG_LEDGER_ROOT")
+    if not location:
+        return "no organization ledger root is supplied to verify the carried head against"
+    store_module=_ledger_store()
+    store=store_module.open_store(store_module.parse_locator(location))
+    head=store.get(store_module.HEAD_KEY)
+    if not isinstance(head,dict) or head.get("receipt_sha256")!=claimed:
+        return "the carried head_receipt_sha is not the current organization ledger head"
+    receipt=store.get(store_module.receipt_key(claimed))
+    body=dict(receipt or {}); body.pop("receipt_sha256",None)
+    if not isinstance(receipt,dict) or receipt.get("receipt_sha256")!=claimed or sha(body)!=claimed:
+        return "the organization ledger head receipt does not verify against its digest"
+    head_reference=receipt.get("hb_reference")
+    failure=supplied_epoch_failure(head_reference.get("epoch") if isinstance(head_reference,dict) else None,
+                                   head_reference if head_reference is not None else {})
+    if failure is not None:
+        return "the organization ledger head's own reference fails the shared rule: "+failure[0]
+    if head_reference.get("epoch")!=reference.get("epoch"):
+        return "the carried epoch is not the organization ledger head's epoch"
+    return None
 
 def carried_frame_epoch(frame:dict[str,Any])->int:
     """The epoch a carrier frame carries, checked by the shared rule, or SuppliedEpochRefused.
 
     The reference is bound to the frame by its digest. A clock-sampled, unmarked
-    or clock-flagged one is refused six-field; no clock is read in its place.
+    or clock-flagged one is refused six-field, as is a CARRIED claim that does
+    not verify against the organization ledger head; no clock is read.
     """
     reference=frame.get("heartbeat_reference")
     epoch=reference.get("epoch") if isinstance(reference,dict) else None
@@ -253,6 +305,18 @@ def carried_frame_epoch(frame:dict[str,Any])->int:
                                  reference=reference if reference is not None else {})
     if refusal is not None:
         raise SuppliedEpochRefused(refusal)
+    unverified=carried_provenance_failure(reference)
+    if unverified is not None:
+        raise SuppliedEpochRefused({
+            "disposition":"FAIL_CLOSED","failure_code":CARRIED_PROVENANCE_UNVERIFIED,
+            "failed_predicate":CARRIED_PROVENANCE_PREDICATE,"detail":unverified,
+            "required_evidence_or_repair":("a carried epoch names source "+CARRIED_PROVENANCE_SOURCE
+                                           +" and head_receipt_sha of the current verified organization "
+                                           "ledger head; it is never stripped and accepted as supplied"),
+            "retry_entrypoint":INGEST_EPOCH_RETRY_ENTRYPOINT,
+            "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt":"re-emit the frame with a verifiable claim or a supplied epoch; nothing was written",
+            "derived_from_clock":False,"consequence_committed":False})
     return int(str(epoch))
 
 def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None)->dict[str,Any]:
@@ -270,7 +334,8 @@ def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None)->d
 
 __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispatch","persist_outbox","ingest_frame",
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
-         "HB_EPOCH_PROVENANCE_UNMARKED","carried_frame_epoch",
+         "HB_EPOCH_PROVENANCE_UNMARKED","carried_frame_epoch","carried_provenance_failure",
+         "CARRIED_PROVENANCE_UNVERIFIED",
          "supplied_epoch_failure","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
 
 

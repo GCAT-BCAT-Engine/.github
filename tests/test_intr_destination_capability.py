@@ -1003,10 +1003,15 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
 
     def test_the_shared_rule_refuses_a_reference_that_does_not_mark_itself_supplied(self):
         self.assertEqual(kernel.supplied_epoch_failure(4096, {})[0], "HB_EPOCH_PROVENANCE_UNMARKED")
+        # Order: present and not false, then a clock sample, then absent.
         self.assertEqual(kernel.supplied_epoch_failure(
-            4096, {"derived_from_clock": False, "sampled_unix_ns": 1})[0], "HB_EPOCH_PROVENANCE_UNMARKED")
+            4096, {"derived_from_clock": False, "sampled_unix_ns": 1})[0], "HB_EPOCH_INVALID")
+        self.assertEqual(kernel.supplied_epoch_failure(4096, {"sampled_unix_ns": 1})[0], "HB_EPOCH_INVALID")
         self.assertEqual(kernel.supplied_epoch_failure(4096, {"derived_from_clock": True})[0],
                          "HB_EPOCH_INVALID")
+        self.assertEqual(kernel.supplied_epoch_failure(
+            4096, {"derived_from_clock": True, "sampled_unix_ns": 1})[1],
+            kernel.supplied_epoch_failure(4096, {"derived_from_clock": True})[1])
         self.assertIsNone(kernel.supplied_epoch_failure(4096, {"derived_from_clock": False}))
         self.assertIsNone(kernel.supplied_epoch_failure(4096))
         refusal = kernel.writer_epoch_refusal(4096, retry_entrypoint="probe", reference={})
@@ -1023,9 +1028,12 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
             packet_id="probe-clock-frame")
         supplied = kernel.carrier_frame(packet, epoch=4096)
         cases = (
-            (kernel.carrier_frame(packet, now_ns=self.CLOCK_NS), "HB_EPOCH_PROVENANCE_UNMARKED"),
+            (kernel.carrier_frame(packet, now_ns=self.CLOCK_NS), "HB_EPOCH_INVALID"),
             (_forged_frame(supplied, derived_from_clock=True), "HB_EPOCH_INVALID"),
-            (_forged_frame(supplied, sampled_unix_ns=self.CLOCK_NS), "HB_EPOCH_PROVENANCE_UNMARKED"),
+            (_forged_frame(supplied, sampled_unix_ns=self.CLOCK_NS), "HB_EPOCH_INVALID"),
+            (_forged_frame({**supplied, "heartbeat_reference": {
+                key: value for key, value in supplied["heartbeat_reference"].items()
+                if key != "derived_from_clock"}}), "HB_EPOCH_PROVENANCE_UNMARKED"),
         )
         for frame, failure_code in cases:
             with self.assertRaises(kernel.SuppliedEpochRefused) as refused:
@@ -1262,7 +1270,7 @@ class FrameEpochReachesTheOperationTests(CopiedRepository):
         self.assertEqual(quarantined["packet_id"], "probe-batch-clock")
         refusal = quarantined["refusal"]
         self.assertEqual(refusal["failure_code"], "FRAME_REFUSED_QUARANTINED")
-        self.assertEqual(refusal["refused_failure_code"], "HB_EPOCH_PROVENANCE_UNMARKED")
+        self.assertEqual(refusal["refused_failure_code"], "HB_EPOCH_INVALID")
         for field in SuppliedEpochParsingTests.SIX_FIELDS:
             self.assertIn(field, refusal)
 
@@ -1309,3 +1317,126 @@ class FrameEpochReachesTheOperationTests(CopiedRepository):
             self.assertEqual(frame["heartbeat_reference"]["epoch"], 4096)
             self.assertIs(frame["heartbeat_reference"]["derived_from_clock"], False)
             self.assertNotIn("sampled_unix_ns", frame["heartbeat_reference"])
+
+
+class CarriedProvenanceTests(CopiedRepository):
+    """B-P36k / G5: a CARRIED claim is verified against the organization head, never stripped.
+
+    A carrier reference that names `source` or `head_receipt_sha` is admitted
+    only when it is the current verified organization ledger head at that
+    epoch. Otherwise ingest refuses six-field CARRIED_PROVENANCE_UNVERIFIED and
+    writes nothing; within a cycle the only write is the B-P36j quarantine.
+    """
+
+    FORGED = "sha256:" + "f" * 64
+
+    def snapshot(self):
+        files = set()
+        for root in (self.copy, *(Path(os.environ[name]) for name in self.LEDGER_ROOTS)):
+            if root.exists():
+                files.update(str(path) for path in root.rglob("*")
+                             if path.is_file() and "__pycache__" not in path.parts)
+        return files
+
+    def carried_frame(self, service, payload, packet_id, *, epoch=4096, **claim):
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=service, payload=payload,
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+            packet_id=packet_id)
+        return _forged_frame(kernel.carrier_frame(packet, epoch=epoch), **claim)
+
+    def routes(self):
+        services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
+        return (
+            (services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "carried"}),
+            (services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-carried-work",
+                                                  "message_class": "ecosystem.work.request",
+                                                  "subject": "probe", "body": {}}),
+            (services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-carried-monitor",
+                                                  "message_class": "ecosystem.monitor.request",
+                                                  "subject": "probe", "body": {}}),
+            (ADDRESS, diagnostic("probe-carried-capability")),
+        )
+
+    def organization_head(self):
+        received = ingress.receive(diagnostic("probe-head"), registry=REGISTRY,
+                                   packet_id="probe-head", hb_epoch=4096)
+        self.assertEqual(received["disposition"], "ALLOW", received.get("detail"))
+        head = json.loads((Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]) / "HEAD.json").read_text())
+        return head["receipt_sha256"]
+
+    def assert_unverified(self, frame):
+        before = self.snapshot()
+        with self.assertRaises(kernel.SuppliedEpochRefused) as refused:
+            kernel.ingest_frame(self.copy, frame, mesh_root=self.mesh)
+        refusal = refused.exception.refusal
+        self.assertEqual(refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, refusal)
+        self.assertEqual(self.snapshot(), before)
+        return refusal
+
+    def test_a_forged_head_sha_is_refused_on_every_route_and_writes_nothing(self):
+        for index, (service, payload) in enumerate(self.routes()):
+            self.assert_unverified(self.carried_frame(
+                service, payload, "probe-forged-" + str(index),
+                source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=self.FORGED))
+        self.assertFalse((self.copy / "resident-runtime/control/inbox").exists()
+                         and any((self.copy / "resident-runtime/control/inbox").iterdir()))
+
+    def test_a_claim_is_refused_when_it_is_not_the_current_verified_head(self):
+        head = self.organization_head()
+        service = self.routes()[0][0]
+        for index, claim in enumerate((
+                {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": self.FORGED},
+                {"source": "SOMEWHERE_ELSE", "head_receipt_sha": head},
+                {"head_receipt_sha": head},
+                {"source": "ORGANIZATION_LEDGER_HEAD"})):
+            self.assert_unverified(self.carried_frame(service, {"probe": index},
+                                                      "probe-claim-" + str(index), **claim))
+        # The current head, at an epoch that is not the head's own.
+        self.assert_unverified(self.carried_frame(
+            service, {"probe": "epoch"}, "probe-claim-epoch", epoch=4097,
+            source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=head))
+
+    def test_a_claim_of_the_current_verified_head_is_admitted(self):
+        head = self.organization_head()
+        frame = self.carried_frame(self.routes()[0][0], {"probe": "verified"}, "probe-verified",
+                                   source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=head)
+        result = kernel.ingest_frame(self.copy, frame, mesh_root=self.mesh)
+        self.assertEqual(result["status"], "CONSUMED")
+        self.assertEqual(result["carried_hb_epoch"], 4096)
+
+    def test_a_forged_claim_in_a_cycle_is_quarantined_and_nothing_else_is_written(self):
+        for index, (service, payload) in enumerate(self.routes()):
+            frame = self.carried_frame(service, payload, "probe-cycle-forged-" + str(index),
+                                       source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=self.FORGED)
+            kernel.publish_frame(frame, root=self.mesh)
+        before = self.snapshot()
+        cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_carried_claim", self.copy / "resident-runtime/federation_cycle.py"))
+        cycle.__spec__.loader.exec_module(cycle)
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        written = self.snapshot() - before
+        seen = self.copy / "resident-runtime/federation/seen.d"
+        latest = self.copy / "resident-runtime/federation/latest-cycle.json"
+        self.assertEqual({Path(path).parent for path in written - {str(latest)}}, {seen})
+        markers = [json.loads(path.read_text(encoding="utf-8")) for path in seen.glob("*.json")]
+        self.assertEqual(len(markers), len(self.routes()))
+        for marker in markers:
+            self.assertEqual(marker["status"], "REFUSED")
+            self.assertEqual(marker["refusal"]["failure_code"], "FRAME_REFUSED_QUARANTINED")
+            self.assertEqual(marker["refusal"]["refused_failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        record = json.loads(latest.read_text(encoding="utf-8"))
+        self.assertEqual((record["frames_consumed"], record["frames_refused"]), (0, len(self.routes())))
+        self.assertEqual(self.ledger_files(), [])
+
+    def ledger_files(self):
+        found = []
+        for name in self.LEDGER_ROOTS:
+            root = Path(os.environ[name])
+            if root.exists():
+                found.extend(path for path in root.rglob("*") if path.is_file())
+        return found
