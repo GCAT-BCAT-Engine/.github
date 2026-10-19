@@ -3610,16 +3610,19 @@ class CarriedCrossingAdmissionRecordTests(CopiedRepository):
         closed = kernel.admission_id(frame)
         off_chain = "0" * 64
         directory = self.copy / "resident-runtime/federation/admissions.d"
+        token = json.loads((directory / (closed + ".json")).read_text(encoding="utf-8"))["admission_token"]
         (directory / (off_chain + ".json")).write_text(json.dumps({
-            "schema": kernel.ADMISSION_SCHEMA, "admission_id": off_chain, "packet_id": "probe-off-chain",
-            "frame_sha256": self.FORGED, "head_receipt_sha": self.FORGED, "epoch": 4096, "closed": False}),
-            encoding="utf-8")
+            "schema": kernel.ADMISSION_SCHEMA, "admission_id": off_chain, "admission_token": token,
+            "packet_id": "probe-off-chain", "frame_sha256": self.FORGED, "head_receipt_sha": self.FORGED,
+            "epoch": 4096, "closed": False}), encoding="utf-8")
         ledger = self.copy_ledger()
         before = sorted(str(path) for name in self.LEDGER_ROOTS for path in Path(os.environ[name]).rglob("*"))
         for identifier, head in ((closed, admitted), ("a" * 64, admitted), ("../" + closed, admitted),
                                  (off_chain, self.FORGED)):
+            # Even holding the right token, a closed, never-written, path-escaping or off-chain
+            # record admits nothing.
             provenance = {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": head,
-                          "admission_id": identifier}
+                          "admission_id": identifier, "admission_token": token}
             for call in (
                     lambda: kernel.supplied_hb_reference(4096, retry_entrypoint="probe", provenance=provenance,
                                                          admission_root=self.copy),
@@ -3660,3 +3663,190 @@ class CarriedCrossingAdmissionRecordTests(CopiedRepository):
         self.assertEqual(acks[-1]["state"], "CONSUMED")
         self.assertEqual(len(submitted), 1)
         self.assert_crossing_landed("probe-admission-ack", admitted)
+
+    def deferred_crossing(self, packet_id):
+        """A CARRIED crossing admitted at H0 and deferred with its record open; the head then moves."""
+        admitted = self.organization_head()
+        frame = self.carried_frame(ADDRESS, diagnostic(packet_id), packet_id,
+                                   source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=admitted)
+        kernel.publish_frame(frame, root=self.mesh)
+        organization_root, torn = self.root_of("STEGVERSE_ORG_LEDGER_ROOT"), []
+
+        def before_put(root, key):
+            if root == organization_root and not torn:
+                torn.append(True)
+                raise OSError(5, "I/O error writing the organization receipt")
+        self.before_put = before_put
+        cycle = self.cycle()
+        self.assertEqual(self.run_cycle(cycle)["frames_deferred"], 1)
+        self.before_put = None
+        self.other_writer()
+        self.assertNotEqual(self.head(), admitted)
+        return cycle, frame, admitted
+
+    def ledger_files(self):
+        return sorted(str(path) for name in self.LEDGER_ROOTS for path in Path(os.environ[name]).rglob("*"))
+
+    def test_an_open_record_admits_no_other_frame_and_a_sender_cannot_name_one(self):
+        cycle, crossing, admitted = self.deferred_crossing("probe-binding")
+        identifier = kernel.admission_id(crossing)
+        guesses = ({"admission_id": identifier},
+                   {"admission_id": identifier, "admission_token": "0" * 64},
+                   {})
+        for index, extra in enumerate(guesses):
+            packet_id = "probe-binding-forged-%d" % index
+            forged = self.carried_frame(ADDRESS, diagnostic(packet_id), packet_id, source="ORGANIZATION_LEDGER_HEAD",
+                                        head_receipt_sha=admitted, **extra)
+            with self.subTest(extra=sorted(extra)):
+                before = self.ledger_files()
+                with self.assertRaises(kernel.SuppliedEpochRefused) as refused:
+                    kernel.ingest_frame(self.copy, forged, mesh_root=self.mesh)
+                self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+                # A sender-named admission is refused, never honoured; with none named, H0 is not current.
+                self.assertIn("names an admission record" if extra else "not the current organization ledger head",
+                              refused.exception.refusal["detail"])
+                self.assertEqual(self.ledger_files(), before)
+                self.assertFalse((self.copy / "resident-runtime/federation/admissions.d"
+                                  / (kernel.admission_id(forged) + ".json")).exists())
+
+    def test_an_open_record_admits_no_unrelated_writer(self):
+        _, crossing, admitted = self.deferred_crossing("probe-binding-writer")
+        identifier = kernel.admission_id(crossing)
+        ledger = self.copy_ledger()
+        before = self.ledger_files()
+        for provenance in ({"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admitted,
+                            "admission_id": identifier},
+                           {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admitted,
+                            "admission_id": identifier, "admission_token": "0" * 64}):
+            for call in (
+                    lambda: kernel.supplied_hb_reference(4096, retry_entrypoint="probe", provenance=provenance,
+                                                         admission_root=self.copy),
+                    lambda: ledger.append_repository("s9", "PROBE", kernel.sha({"p": 1}), kernel.sha({"p": 2}),
+                                                     {}, "NONE", hb_epoch=4096, hb_provenance=provenance)):
+                with self.subTest(fields=sorted(provenance)):
+                    with self.assertRaises(ValueError) as refused:
+                        call()
+                    self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        self.assertEqual(self.ledger_files(), before)
+
+    def test_the_deferred_crossing_itself_still_completes_once_after_the_forgeries(self):
+        cycle, crossing, admitted = self.deferred_crossing("probe-binding-own")
+        forged = self.carried_frame(ADDRESS, diagnostic("probe-binding-own-forged"), "probe-binding-own-forged",
+                                    source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=admitted,
+                                    admission_id=kernel.admission_id(crossing))
+        kernel.publish_frame(forged, root=self.mesh)
+        record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_consumed"], record["frames_refused"]), (1, 1))
+        repository, organization = self.crossing_receipts("probe-binding-own")
+        self.assertEqual((len(repository), len(organization)), (1, 1))
+        self.assertEqual(self.crossing_receipts("probe-binding-own-forged"), ([], []))
+
+
+
+class ProcessBoundaryExitSplitTests(CopiedRepository):
+    """PB-EXIT-SPLIT (lead 09:54Z, VALIDATOR V-P11): process_boundary exits 65 for the crossing's own
+    fault (terminal six-field) and 75 for this organization's own write fault (non-terminal, nothing
+    durable written). Its one caller, resident-runtime/run_once.py, keeps them apart: 65 is terminal,
+    75 is non-terminal and the same run completes the crossing once. Frame ingest never calls
+    process_boundary; its own split is kernel.ingest_or_quarantine (TotalGuardAndDispatchIoTests)."""
+
+    def envelope(self):
+        services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
+        return {"schema_version": "stegverse.intr.org-boundary.v1", "packet_id": "probe-pb", "direction": "INGRESS",
+                "origin": {"org": PEER, "service": "peer.boundary-diagnostic"},
+                "destination": {"org": THIS, "service": services["BOUNDARY_LOCAL_DIAGNOSTIC"]},
+                "carrier": {"kind": "HB_DERIVED", "reference": "HB-probe"}, "intr_profile": "stegverse.intr.org-boundary.v1",
+                "transition": {"reference": "probe", "authority_effect": "NONE"}, "payload": {"probe": "ping"},
+                "evidence": {"ingress_receipt": None, "dispatch_receipt": None, "consumption_receipt": None,
+                             "egress_receipt": None, "reconstruction_reference": None}}
+
+    def write(self, name, value):
+        path = Path(self._work.name) / name
+        path.write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
+        return path
+
+    def boundary(self, envelope, out):
+        return subprocess.run(["python3", "org-boundary/runtime/process_boundary.py", "--envelope", str(envelope),
+                               "--out", str(out)], cwd=self.copy, capture_output=True, text=True)
+
+    def run_once(self, ingress, egress):
+        return subprocess.run(["python3", "resident-runtime/run_once.py", "--ingress", str(ingress),
+                               "--egress", str(egress)], cwd=self.copy, capture_output=True, text=True,
+                              env={**os.environ, "PYTHONPATH": str(self.copy / "resident-runtime")})
+
+    def six_field(self, run, code, terminal):
+        self.assertNotIn("Traceback", run.stderr)
+        record = json.loads(run.stdout.splitlines()[-1])
+        self.assertEqual((record["disposition"], record["failure_code"], record["terminal"]),
+                         ("FAIL_CLOSED", code, terminal))
+        for field in ("failed_predicate", "detail", "required_evidence_or_repair", "retry_entrypoint",
+                      "owning_existing_goal", "next_attempt"):
+            self.assertTrue(record[field], field)
+        return record
+
+    def test_process_boundary_exits_65_for_a_bad_crossing_and_75_for_its_own_write_fault(self):
+        out = Path(self._work.name) / "out" / "execution.json"
+        for name, value in (("missing.json", None), ("not-json.json", "{not json"), ("list.json", "[1]"),
+                            ("fields.json", {"packet_id": "x"}),
+                            ("elsewhere.json", {**self.envelope(), "destination": {"org": PEER, "service": "x"}})):
+            with self.subTest(input=name):
+                path = Path(self._work.name) / name if value is None else self.write(name, value)
+                run = self.boundary(path, out)
+                self.assertEqual(run.returncode, 65, run.stderr)
+                self.six_field(run, "PROCESS_BOUNDARY_INPUT_FAULT", True)
+                self.assertFalse(out.exists())
+        blocked = self.write("blocked", "a file where the --out directory must be")
+        run = self.boundary(self.write("good.json", self.envelope()), blocked / "execution.json")
+        self.assertEqual(run.returncode, 75, run.stderr)
+        self.six_field(run, "PROCESS_BOUNDARY_WRITE_FAULT", False)
+        run = self.boundary(self.write("good.json", self.envelope()), out)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertTrue(json.loads(out.read_text())["consumed"])
+
+    def stub_boundary(self, status, record):
+        """Replace the copy's process_boundary with one that exits `status`, printing `record`."""
+        path = self.copy / "org-boundary/runtime/process_boundary.py"
+        original = path.read_text(encoding="utf-8")
+        path.write_text("import json, sys\nprint(json.dumps(%r))\nsys.exit(%d)\n" % (record, status), encoding="utf-8")
+        return lambda: path.write_text(original, encoding="utf-8")
+
+    def test_run_once_keeps_75_non_terminal_and_65_terminal(self):
+        ingress, egress = self.write("ingress.json", self.envelope()), Path(self._work.name) / "egress" / "egress.json"
+        restore = self.stub_boundary(75, {"disposition": "FAIL_CLOSED", "failure_code": "PROCESS_BOUNDARY_WRITE_FAULT",
+                                          "terminal": False, "failed_predicate": "P", "detail": "d",
+                                          "required_evidence_or_repair": "r", "retry_entrypoint": "e",
+                                          "owning_existing_goal": "g", "next_attempt": "n"})
+        run = self.run_once(ingress, egress)
+        restore()
+        self.assertEqual(run.returncode, 75, run.stderr)
+        self.six_field(run, "PROCESS_BOUNDARY_WRITE_FAULT", False)
+        self.assertFalse(egress.exists())
+        # The same run then completes the crossing, once.
+        run = self.run_once(ingress, egress)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(json.loads(egress.read_text())["payload"]["request_packet_id"], "probe-pb")
+        egress.unlink()
+        restore = self.stub_boundary(65, {"disposition": "FAIL_CLOSED", "failure_code": "PROCESS_BOUNDARY_INPUT_FAULT",
+                                          "terminal": True, "failed_predicate": "P", "detail": "d",
+                                          "required_evidence_or_repair": "r", "retry_entrypoint": "e",
+                                          "owning_existing_goal": "g", "next_attempt": "n"})
+        run = self.run_once(ingress, egress)
+        restore()
+        self.assertEqual(run.returncode, 65, run.stderr)
+        self.six_field(run, "PROCESS_BOUNDARY_INPUT_FAULT", True)
+        self.assertFalse(egress.exists())
+
+    def test_run_once_own_faults_split_the_same_way(self):
+        egress = Path(self._work.name) / "egress" / "egress.json"
+        for name, value in (("missing.json", None), ("not-json.json", "{not json"),
+                            ("wrong.json", {**self.envelope(), "direction": "EGRESS"})):
+            with self.subTest(input=name):
+                path = Path(self._work.name) / name if value is None else self.write(name, value)
+                run = self.run_once(path, egress)
+                self.assertEqual(run.returncode, 65, run.stderr)
+                self.six_field(run, "RUN_ONCE_INPUT_FAULT", True)
+        blocked = self.write("blocked-egress", "a file where the --egress directory must be")
+        run = self.run_once(self.write("ingress.json", self.envelope()), blocked / "egress.json")
+        self.assertEqual(run.returncode, 75, run.stderr)
+        self.six_field(run, "RUN_ONCE_WRITE_FAULT", False)
+        self.assertFalse(egress.exists())
