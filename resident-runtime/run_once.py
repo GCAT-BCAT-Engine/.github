@@ -39,12 +39,16 @@ def main():
    if run.returncode==EXIT_INPUT_FAULT:
     # The crossing's own fault: terminal, relayed as the boundary recorded it.
     print(json.dumps(child_record(run) or record("PROCESS_BOUNDARY_INPUT_FAULT",True,"THE_ENVELOPE_AND_REGISTRY_ARE_A_PROCESSABLE_CROSSING",run.stderr[-500:],"a processable crossing","this crossing is terminal"),sort_keys=True)); return EXIT_INPUT_FAULT
-   if run.returncode!=0:
-    # 75, or any other non-zero status: never treated as the crossing's fault.
+   if run.returncode==EXIT_WRITE_FAULT:
+    # The boundary's own write fault: non-terminal, nothing durable was written.
     child=child_record(run)
-    if run.returncode==EXIT_WRITE_FAULT and child is not None:
+    if child is not None:
      print(json.dumps(child,sort_keys=True)); return EXIT_WRITE_FAULT
-    return write_fault("process_boundary exited "+str(run.returncode)+": "+(run.stdout+run.stderr)[-500:])
+    return write_fault("process_boundary exited 75: "+(run.stdout+run.stderr)[-500:])
+   if run.returncode!=0:
+    # Exit 1, an unknown code or a crash: a terminal refusal, so an unclassified
+    # failure never stays pending forever.
+    print(json.dumps(record("PROCESS_BOUNDARY_REFUSED_EXIT_"+str(run.returncode),True,"PROCESS_BOUNDARY_EXITS_0_65_OR_75","process_boundary exited "+str(run.returncode)+": "+(run.stdout+run.stderr)[-500:],"a process_boundary that classifies its fault as 65 (input) or 75 (own write)","this crossing is terminal; nothing was written"),sort_keys=True)); return EXIT_INPUT_FAULT
    result=json.loads(p.read_text())
   egress=build_egress(ingress,result); validate_org_crossing(egress,"EGRESS"); write_egress(Path(a.egress),egress)
  except OSError as exc:

@@ -3836,6 +3836,21 @@ class ProcessBoundaryExitSplitTests(CopiedRepository):
         self.six_field(run, "PROCESS_BOUNDARY_INPUT_FAULT", True)
         self.assertFalse(egress.exists())
 
+    def test_run_once_makes_exit_1_and_unknown_codes_terminal(self):
+        ingress, egress = self.write("ingress.json", self.envelope()), Path(self._work.name) / "egress" / "egress.json"
+        for status in (1, 3):
+            with self.subTest(status=status):
+                path = self.copy / "org-boundary/runtime/process_boundary.py"
+                original = path.read_text(encoding="utf-8")
+                path.write_text("import sys\nsys.exit(%d)\n" % status, encoding="utf-8")
+                try:
+                    run = self.run_once(ingress, egress)
+                finally:
+                    path.write_text(original, encoding="utf-8")
+                self.assertEqual(run.returncode, 65, run.stderr)
+                self.six_field(run, "PROCESS_BOUNDARY_REFUSED_EXIT_%d" % status, True)
+                self.assertFalse(egress.exists())
+
     def test_run_once_own_faults_split_the_same_way(self):
         egress = Path(self._work.name) / "egress" / "egress.json"
         for name, value in (("missing.json", None), ("not-json.json", "{not json"),
