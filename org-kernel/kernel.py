@@ -143,7 +143,8 @@ def writer_epoch_refusal(hb_epoch:Any, *, retry_entrypoint:str, reference:Any=No
             "next_attempt":"call again with the supplied epoch; nothing was written",
             "derived_from_clock":False,"consequence_committed":False}
 
-def supplied_hb_reference(hb_epoch:Any, *, retry_entrypoint:str, provenance:dict[str,Any]|None=None)->dict[str,Any]:
+def supplied_hb_reference(hb_epoch:Any, *, retry_entrypoint:str, provenance:dict[str,Any]|None=None,
+                          admission_root:Path|None=None)->dict[str,Any]:
     """The heartbeat reference of a supplied epoch, or SuppliedEpochRefused. No clock is read.
 
     With `provenance` (a CARRIED claim's `source` and `head_receipt_sha`), the
@@ -158,7 +159,9 @@ def supplied_hb_reference(hb_epoch:Any, *, retry_entrypoint:str, provenance:dict
     if provenance is not None:
         claim={"epoch":epoch,"derived_from_clock":False,
                **{key:provenance.get(key) for key in CARRIED_PROVENANCE_FIELDS}}
-        unverified=carried_provenance_failure(claim)
+        if "admission_id" in provenance:
+            claim["admission_id"]=provenance["admission_id"]
+        unverified=carried_provenance_failure(claim,admission_root=admission_root)
         if unverified is not None:
             raise SuppliedEpochRefused(carried_provenance_refusal(unverified,retry_entrypoint))
     return hb_reference(epoch=epoch,provenance=provenance)
@@ -323,19 +326,65 @@ def carried_provenance_refusal(detail:str, retry_entrypoint:str)->dict[str,Any]:
             "next_attempt":"re-emit with a verifiable claim or a supplied epoch; nothing was written",
             "derived_from_clock":False,"consequence_committed":False}
 
-def carried_provenance_failure(reference:dict[str,Any])->str|None:
+ADMISSION_SCHEMA="stegverse.carried-crossing-admission.v1"
+
+def admission_directory(root:Path|None=None)->Path:
+    """This boundary's own durable admission records."""
+    return (root or Path(__file__).resolve().parents[1])/"resident-runtime/federation/admissions.d"
+
+def admission_id(frame:dict[str,Any])->str:
+    """A crossing's admission id: the frame's packet id and frame digest, never a caller's choice."""
+    return sha(str(frame.get("packet_id"))+"|"+str(frame.get("frame_sha256")))[7:]
+
+def admission_record(identifier:Any, *, root:Path|None=None, include_closed:bool=False)->dict[str,Any]|None:
+    """The open admission record ingest wrote for a crossing, or None.
+
+    Only ingest writes one, after verifying the crossing's claim against the
+    then-current organization head; it is closed when the crossing's dispatch
+    ends, so a closed or absent record admits nothing.
+    """
+    if not isinstance(identifier,str) or len(identifier)!=64 or any(c not in "0123456789abcdef" for c in identifier):
+        return None
+    path=admission_directory(root)/(identifier+".json")
+    try:
+        record=json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError,ValueError):
+        return None
+    if not isinstance(record,dict) or record.get("schema")!=ADMISSION_SCHEMA or record.get("admission_id")!=identifier:
+        return None
+    if record.get("closed") is not False and not include_closed:
+        return None
+    return record
+
+def organization_chain_member(store_module:Any, store:Any, head:Any, digest:str)->bool:
+    """Whether `digest` is on the organization chain the live HEAD reaches."""
+    cursor=head.get("receipt_sha256") if isinstance(head,dict) else None
+    visited=set()
+    while isinstance(cursor,str) and cursor not in visited:
+        if cursor==digest:
+            return True
+        visited.add(cursor)
+        node=store.get(store_module.receipt_key(cursor))
+        cursor=node.get("previous_receipt_sha256") if isinstance(node,dict) else None
+    return False
+
+def carried_provenance_failure(reference:dict[str,Any], *, admission_root:Path|None=None)->str|None:
     """Why a carrier's CARRIED claim does not verify, or None when it makes none or verifies.
 
     A reference naming `source` or `head_receipt_sha` claims its epoch was read
     from the organization ledger head. It is verified against that head, read
     without writing: the source is ORGANIZATION_LEDGER_HEAD, the sha is the
     current HEAD, the head receipt is bound by its digest, its own reference
-    passes the shared rule, and the epochs agree. Ingest and every writer
-    check the same thing, and no caller-supplied record widens it. A GCAT
-    crossing writes one repository receipt and then its one organization
-    receipt, last, and the repository write does not move the organization
-    HEAD, so the HEAD a writer sees is the one ingest admitted. A claim is
-    never stripped and the frame accepted as supplied.
+    passes the shared rule, and the epochs agree. A claim is never stripped
+    and the frame accepted as supplied.
+
+    Inside an admitted crossing (`admission_id`), another writer may move the
+    live head between the crossing's repository and organization writes. Its
+    writers then verify against the crossing's durable admission record,
+    written by ingest alone: the claim is the admitted head and epoch, that
+    head is on the chain the live head reaches, and the digest and the shared
+    rule hold as before. The id names a record, never a head: a caller cannot
+    assert one, and a closed or absent record admits nothing.
     """
     if not any(field in reference for field in CARRIED_PROVENANCE_FIELDS):
         return None
@@ -350,7 +399,19 @@ def carried_provenance_failure(reference:dict[str,Any])->str|None:
     store_module=_ledger_store()
     store=store_module.open_store(store_module.parse_locator(location))
     head=store.get(store_module.HEAD_KEY)
-    if not isinstance(head,dict) or head.get("receipt_sha256")!=claimed:
+    if "admission_id" in reference:
+        # A writer inside an admitted crossing: the head it verifies against is
+        # the one ingest admitted and recorded durably, not the live head, which
+        # another writer may have moved since. That head must still be on the
+        # organization chain the live head reaches.
+        admitted=admission_record(reference["admission_id"],root=admission_root)
+        if admitted is None:
+            return "no open admission record "+repr(reference["admission_id"])+" was written by ingest"
+        if admitted.get("head_receipt_sha")!=claimed or admitted.get("epoch")!=reference.get("epoch"):
+            return "the carried claim is not the head and epoch its crossing's admission record admitted"
+        if not organization_chain_member(store_module,store,head,claimed):
+            return "the admitted head is not on the organization ledger chain"
+    elif not isinstance(head,dict) or head.get("receipt_sha256")!=claimed:
         return "the carried head_receipt_sha is not the current organization ledger head"
     receipt=store.get(store_module.receipt_key(claimed))
     body=dict(receipt or {}); body.pop("receipt_sha256",None)
@@ -367,7 +428,7 @@ def carried_provenance_failure(reference:dict[str,Any])->str|None:
 
 HB_EPOCH_CONFLICT="HB_EPOCH_CONFLICT"
 
-def carried_frame_epoch(frame:dict[str,Any])->int|None:
+def carried_frame_epoch(frame:dict[str,Any], *, admission:str|None=None)->int|None:
     """The epoch a carrier frame lends, checked by the shared rule, or SuppliedEpochRefused.
 
     The reference is bound to the frame by its digest. A CLOCK one -- flagged
@@ -404,7 +465,8 @@ def carried_frame_epoch(frame:dict[str,Any])->int|None:
     if refusal is not None:
         raise SuppliedEpochRefused(refusal)
     reference_consistency(reference)
-    unverified=carried_provenance_failure(reference)
+    claim=reference if admission is None else {**reference,"admission_id":admission}
+    unverified=carried_provenance_failure(claim)
     if unverified is not None:
         raise SuppliedEpochRefused(carried_provenance_refusal(unverified,INGEST_EPOCH_RETRY_ENTRYPOINT))
     return int(str(epoch))
@@ -439,6 +501,12 @@ def frame_provenance(frame:dict[str,Any])->dict[str,Any]|None:
         return None
     return {field:reference.get(field) for field in CARRIED_PROVENANCE_FIELDS}
 
+def close_admission(root:Path, identifier:str)->None:
+    """Close a crossing's admission record: it admits nothing after its dispatch ends."""
+    record=admission_record(identifier,root=root)
+    if record is not None:
+        write_json_atomic(admission_directory(root)/(identifier+".json"),{**record,"closed":True})
+
 def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
                  hb_epoch:Any=None)->dict[str,Any]:
     """Consume one addressed frame at the epoch it is supplied, or refuse six-field.
@@ -457,7 +525,23 @@ def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
     explicit=None
     if hb_epoch is not None:
         explicit=supplied_hb_reference(hb_epoch,retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT)["epoch"]
-    carried=carried_frame_epoch(frame)
+    # This frame's own admission record, if ingest already wrote one: the id is
+    # derived from the frame, so a re-offered frame (a deferred retry, or a
+    # gateway frame whose ack was lost) verifies against the head it was
+    # admitted at, reopening its record for the replay.
+    record=(admission_record(admission_id(frame),root=root,include_closed=True)
+            if frame_provenance(frame) is not None else None)
+    admitted=None
+    if record is not None:
+        admitted=record["admission_id"]
+        if record.get("closed") is not False:
+            write_json_atomic(admission_directory(root)/(admitted+".json"),{**record,"closed":False})
+    try:
+        carried=carried_frame_epoch(frame,admission=admitted)
+    except SuppliedEpochRefused:
+        if admitted is not None:
+            close_admission(root,admitted)
+        raise
     if explicit is not None and carried is not None and explicit!=carried:
         raise SuppliedEpochRefused({
             "disposition":"FAIL_CLOSED","failure_code":HB_EPOCH_CONFLICT,
@@ -470,14 +554,36 @@ def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
             "derived_from_clock":False,"consequence_committed":False})
     epoch=explicit if explicit is not None else carried
     provenance=frame_provenance(frame) if carried is not None else None
-    result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=epoch,hb_provenance=provenance)
+    if provenance is not None:
+        # The crossing's durable admission record, before any write: the head
+        # its claim verified against. A retry of a deferred crossing reads the
+        # same record, so a head another writer moved meanwhile refuses nothing.
+        identifier=admission_id(frame)
+        if admitted is None:
+            write_json_atomic(admission_directory(root)/(identifier+".json"),{
+                "schema":ADMISSION_SCHEMA,"admission_id":identifier,"packet_id":frame["packet_id"],
+                "frame_sha256":frame["frame_sha256"],"head_receipt_sha":provenance["head_receipt_sha"],
+                "epoch":carried,"closed":False})
+        provenance={**provenance,"admission_id":identifier}
+    try:
+        result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=epoch,hb_provenance=provenance)
+    except Exception as exc:
+        # A writer fault leaves the crossing pending, its record open for the
+        # retry; any other end closes it.
+        if provenance is not None and not is_writer_fault(exc):
+            close_admission(root,provenance["admission_id"])
+        raise
+    if provenance is not None:
+        close_admission(root,provenance["admission_id"])
+        provenance={key:provenance[key] for key in CARRIED_PROVENANCE_FIELDS}
     return {"status":"CONSUMED","packet":packet,"execution_result":result,
             "carried_hb_epoch":carried,"hb_epoch":epoch,"carried_provenance":provenance}
 
 __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispatch","persist_outbox","ingest_frame",
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
          "HB_EPOCH_PROVENANCE_UNMARKED","HB_EPOCH_CONFLICT","carried_frame_epoch","carried_provenance_failure",
-         "carried_provenance_refusal","frame_provenance","ingest_or_quarantine","frame_failure_refusal",
+         "carried_provenance_refusal","frame_provenance","admission_id","admission_record","close_admission",
+         "ADMISSION_SCHEMA","ingest_or_quarantine","frame_failure_refusal",
          "recorded_response","response_collision_refusal","writer_fault_refusal","cli_refusal",
          "WRITER_IO_FAILED","WRITER_WRITE_FAILED","control_response_packet_id","request_binding",
          "RESPONSE_ID_COLLISION","ResponseIdCollision","RESPONDING_MESSAGE_CLASSES","write_json_atomic","write_once_json",
@@ -671,7 +777,7 @@ RESIDENT_STATUS_EPOCH_RETRY_ENTRYPOINT="org-kernel/kernel.py::resident_status (h
 def resident_status(root:Path, registry:dict[str,Any]|None=None, *, hb_epoch:Any=None,
                     hb_provenance:dict[str,Any]|None=None)->dict[str,Any]:
     heartbeat=supplied_hb_reference(hb_epoch,retry_entrypoint=RESIDENT_STATUS_EPOCH_RETRY_ENTRYPOINT,
-                                    provenance=hb_provenance)
+                                    provenance=hb_provenance,admission_root=root)
     reg=registry or load_registry(root)
     activation_path=root/"resident-runtime/activation-manifest.json"
     activation=json.loads(activation_path.read_text()) if activation_path.exists() else {}

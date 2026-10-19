@@ -2493,13 +2493,10 @@ class TransientWriterFaultTests(CopiedRepository):
 
 
 class CarriedWriterVerificationTests(CopiedRepository):
-    """B-P36m writers (lead 09:00Z, VALIDATOR V-P11): every writer verifies a carried claim
-    against the current organization head, as ingest does; no caller-supplied record widens it.
-
-    N/A for the admission-record form: a GCAT crossing writes one repository
-    receipt and then its one organization receipt, last
-    (intr_destination_ingress._append), and the repository write does not move
-    the organization HEAD, so the HEAD each writer sees is the one ingest admitted.
+    """B-P36m writers (lead 09:00Z, VALIDATOR V-P11): outside an admitted crossing, every writer
+    verifies a carried claim against the current organization head, as ingest does; no
+    caller-supplied head widens it. Inside one, writers verify against the crossing's durable
+    admission record (CarriedCrossingAdmissionRecordTests).
     """
 
     def ledger_files(self):
@@ -3218,3 +3215,224 @@ class WriterTraceTests(CopiedRepository):
             return self.cli("cycle_trace", "resident-runtime/federation_cycle.py")()
         self.assert_each_write_fault_is_six_field_and_resumable(
             load, ["federation_cycle.py", "--hb-epoch", "4096"])
+
+
+class CarriedCrossingAdmissionRecordTests(CopiedRepository):
+    """B-P36m race (VALIDATOR V-P11 @330970f): another writer can move the organization head
+    between a CARRIED crossing's repository and organization writes. Ingest writes a durable
+    admission record before any write; the crossing's later writers verify against it (the
+    admitted head and epoch, on the chain the live head reaches, by digest), not the live head.
+    So a crossing is never left with a repository receipt and no organization receipt."""
+
+    FORGED = "sha256:" + "f" * 64
+
+    def setUp(self):
+        super().setUp()
+        self.before_put = None
+        self.after_append = None
+        test = self
+
+        def hooked_put(original):
+            def put(store, key, value):
+                if test.before_put is not None:
+                    test.before_put(str(Path(store.root).resolve()), key)
+                return original(store, key, value)
+            put.__hooked_original__ = original
+            return put
+
+        def hooked_append(original):
+            def append_transaction(store, *args, **kwargs):
+                result = original(store, *args, **kwargs)
+                # After the transaction returns its lock is released: the gap
+                # between a crossing's repository and organization writes.
+                if test.after_append is not None:
+                    test.after_append(str(Path(store.root).resolve()))
+                return result
+            append_transaction.__hooked_original__ = original
+            return append_transaction
+
+        def patch_store_classes(module):
+            store = getattr(module, "PosixLedgerStore", None)
+            if store is not None and not hasattr(store.put, "__hooked_original__"):
+                for name, hook in (("put", hooked_put), ("append_transaction", hooked_append)):
+                    original = getattr(store, name)
+                    setattr(store, name, hook(original))
+                    self.addCleanup(setattr, store, name, original)
+
+        for module in list(sys.modules.values()):
+            patch_store_classes(module)
+        real_exec = importlib.machinery.SourceFileLoader.exec_module
+
+        def exec_module(loader, module):
+            real_exec(loader, module)
+            patch_store_classes(module)
+        patcher = mock.patch.object(importlib.machinery.SourceFileLoader, "exec_module", exec_module)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    cycle = TransientWriterFaultTests.cycle
+    run_cycle = TransientWriterFaultTests.run_cycle
+    carried_frame = CarriedProvenanceTests.carried_frame
+    organization_head = CarriedProvenanceTests.organization_head
+    assert_chain_has_no_orphan = TornHeadWriteTests.assert_chain_has_no_orphan
+
+    def root_of(self, variable):
+        return str(Path(os.environ[variable]).resolve())
+
+    def head(self):
+        return json.loads((Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]) / "HEAD.json").read_text())["receipt_sha256"]
+
+    def other_writer(self):
+        """A second writer, in its own process: one organization receipt appended FROM_HEAD."""
+        source = Path(self._work.name) / "other-writer-source.json"
+        if not source.exists():
+            emitted = ingress.ledger.emit.append(
+                "probe:other-writer", "PROBE", kernel.sha({"other": 1}), kernel.sha({"other": 2}),
+                {}, "NONE", hb_epoch=4096)
+            source.write_text(json.dumps(emitted), encoding="utf-8")
+        run = subprocess.run(
+            ["timeout", "60", "python3", str(self.copy / "resident-runtime/aggregate_repo_transition.py"),
+             "--transition-receipt", str(source), "--predecessor-org-state-sha256", "FROM_HEAD",
+             "--successor-org-state-sha256", kernel.sha({"other": 3}), "--hb-epoch", "4096"],
+            env=dict(os.environ), capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def crossing_receipts(self, packet_id):
+        repository = [receipt for receipt in self.receipts(
+            "STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+            if (receipt.get("evidence") or {}).get("communication_id") == packet_id]
+        organization = [receipt for receipt in self.receipts(
+            "STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1")
+            if (receipt.get("boundary_evidence") or receipt.get("evidence") or {}).get("communication_id")
+            == packet_id]
+        return repository, organization
+
+    def admissions(self):
+        directory = self.copy / "resident-runtime/federation/admissions.d"
+        return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(directory.glob("*.json"))]
+
+    def assert_crossing_landed(self, packet_id, admitted):
+        repository, organization = self.crossing_receipts(packet_id)
+        self.assertEqual((len(repository), len(organization)), (1, 1))
+        for receipt in repository + organization:
+            reference = receipt["hb_reference"]
+            self.assertEqual((reference["source"], reference["head_receipt_sha"], reference["epoch"]),
+                             ("ORGANIZATION_LEDGER_HEAD", admitted, 4096))
+            self.assertNotIn("admission_id", reference)
+        for variable in self.LEDGER_ROOTS:
+            self.assert_chain_has_no_orphan(variable)
+        records = self.admissions()
+        self.assertEqual([(record["packet_id"], record["head_receipt_sha"], record["closed"])
+                          for record in records], [(packet_id, admitted, True)])
+
+    def test_a_concurrent_organization_append_between_the_crossings_writes(self):
+        admitted = self.organization_head()
+        frame = self.carried_frame(ADDRESS, diagnostic("probe-race"), "probe-race",
+                                   source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=admitted)
+        kernel.publish_frame(frame, root=self.mesh)
+        repository_root, raced = self.root_of("STEGVERSE_REPO_LEDGER_ROOT"), []
+
+        def after_append(root):
+            if root == repository_root and not raced:
+                raced.append(True)
+                self.other_writer()
+        self.after_append = after_append
+        record = self.run_cycle(self.cycle())
+        self.after_append = None
+        self.assertEqual(raced, [True])
+        self.assertEqual((record["frames_consumed"], record["frames_refused"]), (1, 0))
+        self.assertNotEqual(self.head(), admitted)
+        self.assert_crossing_landed("probe-race", admitted)
+
+    def test_a_deferred_crossing_resumes_after_another_writer_moved_the_head(self):
+        admitted = self.organization_head()
+        frame = self.carried_frame(ADDRESS, diagnostic("probe-race-resume"), "probe-race-resume",
+                                   source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=admitted)
+        kernel.publish_frame(frame, root=self.mesh)
+        organization_root, torn = self.root_of("STEGVERSE_ORG_LEDGER_ROOT"), []
+
+        def before_put(root, key):
+            # The first organization write of the crossing: nothing of it is
+            # written, so the other writer is not held back by a torn copy.
+            if root == organization_root and not torn:
+                torn.append(True)
+                raise OSError(5, "I/O error writing the organization receipt")
+        self.before_put = before_put
+        cycle = self.cycle()
+        first = self.run_cycle(cycle)
+        self.before_put = None
+        self.assertEqual((first["frames_deferred"], first["frames_refused"]), (1, 0))
+        self.assertEqual([record["closed"] for record in self.admissions()], [False])
+        self.other_writer()
+        self.assertNotEqual(self.head(), admitted)
+        second = self.run_cycle(cycle)
+        self.assertEqual((second["frames_consumed"], second["frames_refused"]), (1, 0))
+        self.assert_crossing_landed("probe-race-resume", admitted)
+        self.assertEqual(self.run_cycle(cycle)["frames_seen"], 0)
+
+    def copy_ledger(self):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "dual_ledger_admission_probe", self.copy / "resident-runtime/dual_ledger.py"))
+        module.__spec__.loader.exec_module(module)
+        return module
+
+    def test_an_admission_id_admits_nothing_once_closed_forged_or_off_chain(self):
+        admitted = self.organization_head()
+        frame = self.carried_frame(ADDRESS, diagnostic("probe-admission-closed"), "probe-admission-closed",
+                                   source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=admitted)
+        kernel.publish_frame(frame, root=self.mesh)
+        self.assertEqual(self.run_cycle(self.cycle())["frames_consumed"], 1)
+        self.other_writer()
+        closed = kernel.admission_id(frame)
+        off_chain = "0" * 64
+        directory = self.copy / "resident-runtime/federation/admissions.d"
+        (directory / (off_chain + ".json")).write_text(json.dumps({
+            "schema": kernel.ADMISSION_SCHEMA, "admission_id": off_chain, "packet_id": "probe-off-chain",
+            "frame_sha256": self.FORGED, "head_receipt_sha": self.FORGED, "epoch": 4096, "closed": False}),
+            encoding="utf-8")
+        ledger = self.copy_ledger()
+        before = sorted(str(path) for name in self.LEDGER_ROOTS for path in Path(os.environ[name]).rglob("*"))
+        for identifier, head in ((closed, admitted), ("a" * 64, admitted), ("../" + closed, admitted),
+                                 (off_chain, self.FORGED)):
+            provenance = {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": head,
+                          "admission_id": identifier}
+            for call in (
+                    lambda: kernel.supplied_hb_reference(4096, retry_entrypoint="probe", provenance=provenance,
+                                                         admission_root=self.copy),
+                    lambda: ledger.append_repository("probe:admission", "PROBE", kernel.sha({"p": 1}),
+                                                     kernel.sha({"p": 2}), {}, "NONE", hb_epoch=4096,
+                                                     hb_provenance=provenance)):
+                with self.subTest(identifier=identifier):
+                    with self.assertRaises(ValueError) as refused:
+                        call()
+                    self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        self.assertEqual(sorted(str(path) for name in self.LEDGER_ROOTS
+                                for path in Path(os.environ[name]).rglob("*")), before)
+
+    def test_a_gateway_frame_offered_again_after_its_crossing_landed_is_replayed_not_refused(self):
+        gateway = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "gateway_admission", self.copy / "resident-runtime/federation_gateway_transport.py"))
+        gateway.__spec__.loader.exec_module(gateway)
+        admitted = self.organization_head()
+        frame = self.carried_frame(ADDRESS, diagnostic("probe-admission-ack"), "probe-admission-ack",
+                                   source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=admitted)
+        submitted, acks = [], []
+
+        def json_request(method, path, body=None, headers=None):
+            if path.endswith("/acknowledgements"):
+                acks.append(body)
+                if len(acks) == 1:
+                    raise OSError(104, "Connection reset by peer")
+                return {"state": body["state"]}
+            submitted.append(body)
+            return {"state": "PENDING"}
+
+        with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
+                mock.patch.object(gateway, "_json_request", side_effect=json_request):
+            self.assertEqual(gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)["state"], "DEFERRED")
+            self.other_writer()
+            again = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+        self.assertEqual((again["state"], again["responses_emitted"]), ("CONSUMED", 0), again.get("refusal"))
+        self.assertEqual(acks[-1]["state"], "CONSUMED")
+        self.assertEqual(len(submitted), 1)
+        self.assert_crossing_landed("probe-admission-ack", admitted)
