@@ -1,0 +1,24 @@
+{
+  "ledger_ref": "refs/stegverse/organization-ledger",
+  "ledger_tip": "ba0098da45beb277c514fd9625e453ea2b640fbc",
+  "ledger_tree": "5c884d366c0751aaab23c515cc1c9ffbb405d5cd",
+  "real_commit": {
+    "merge_commit": "c3cf1b1ab171d0ea04a1d345e7567860f00519a3",
+    "parents": [
+      "5393ee03f74f294173becbbaef507c6b70485a8d",
+      "ae927349d60cf3f1ea74b5b3a506fdc13df55b73"
+    ],
+    "subject": "Merge pull request #12 from GCAT-BCAT-Engine/cursor/org-ledger-self-closure-f809",
+    "tree": "934179a02bb635651064a7dcafb60245b16534f5"
+  },
+  "real_state_at_ledger_tip": {
+    "disposition": "FAIL_CLOSED",
+    "failure_code": "MERGE_TRANSFER_RECEIPT_NOT_LEDGERED"
+  },
+  "repository": "GCAT-BCAT-Engine/.github",
+  "repository_ledger_namespace": "repository-ledger/GCAT-BCAT-Engine/.github",
+  "schema": "stegverse.merge-transfer-gitstore-test-pin/v1",
+  "snapshot": "ledger-snapshot.json",
+  "snapshot_note": "the pinned ledger tip's tree, blob for blob (its git tree id is ledger_tree); copied from the published ref, not authored here",
+  "writer_surface": "DUAL_LEDGER"
+}
