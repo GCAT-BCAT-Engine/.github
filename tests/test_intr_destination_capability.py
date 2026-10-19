@@ -17,8 +17,10 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -342,6 +344,72 @@ class AddressedAndClosedTests(RedirectedLedgers):
             "STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1"), [])
         self.assertEqual(self.receipts(
             "STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1"), [])
+
+    def _emit_refused_before_anything_is_published(self, **epoch):
+        def untouched(*_args, **_kwargs):
+            raise AssertionError("reached before the epoch was checked")
+
+        for name in ("publish_packet", "publish_frame", "carrier_frame", "hb_reference"):
+            patcher = mock.patch.object(egress.kernel, name, untouched)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with self.assertRaises(egress.EgressEpochRefused) as raised:
+            egress.emit(PEER, diagnostic("epoch-refused-diagnostic"), standing=STANDING,
+                        capability=PROFILE_ID, mesh_root=self.mesh, **epoch)
+        refusal = raised.exception.refusal
+        for field in ("failure_code", "failed_predicate", "required_evidence_or_repair",
+                      "retry_entrypoint", "owning_existing_goal", "next_attempt"):
+            self.assertTrue(refusal[field], field)
+        self.assertEqual(refusal["disposition"], "FAIL_CLOSED")
+        self.assertEqual(refusal["failed_predicate"], "SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH")
+        self.assertEqual(refusal["retry_entrypoint"], egress.EPOCH_RETRY_ENTRYPOINT)
+        self.assertIs(refusal["consequence_committed"], False)
+        self.assertFalse((self.mesh / "frames.d").exists())
+        self.assertEqual(self.frames_to(PEER), [])
+        for variable in self.LEDGER_ROOTS:
+            self.assertFalse(Path(os.environ[variable]).exists(), variable)
+        return refusal
+
+    def test_an_emission_without_a_supplied_epoch_publishes_nothing(self):
+        refusal = self._emit_refused_before_anything_is_published()
+        self.assertEqual(refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+
+    def test_an_emission_with_an_invalid_epoch_publishes_nothing(self):
+        for epoch in ("33.0", True, 31, "+33"):
+            with self.subTest(epoch=epoch):
+                refusal = self._emit_refused_before_anything_is_published(hb_epoch=epoch)
+                self.assertEqual(refusal["failure_code"], "HB_EPOCH_INVALID")
+
+    def test_the_emission_command_refuses_without_an_epoch_and_publishes_nothing(self):
+        work = Path(self._work.name)
+        (work / "payload.json").write_text(json.dumps(diagnostic("command-diagnostic")),
+                                           encoding="utf-8")
+        (work / "standing.json").write_text(json.dumps(STANDING), encoding="utf-8")
+        for epoch in (None, "33.0", "31", "+33"):
+            with self.subTest(epoch=epoch):
+                args = ["python3", str(ROOT / "resident-runtime/organization_egress_boundary.py"),
+                        "--destination-organization", PEER, "--capability", PROFILE_ID,
+                        "--payload", str(work / "payload.json"),
+                        "--standing", str(work / "standing.json"), "--mesh-root", str(self.mesh)]
+                if epoch is not None:
+                    args += ["--hb-epoch", epoch]
+                run = subprocess.run(args, env=dict(os.environ), capture_output=True, text=True)
+                self.assertEqual(run.returncode, 1, run.stderr)
+                refusal = json.loads(run.stdout)
+                self.assertEqual(refusal["failure_code"],
+                                 "HB_EPOCH_NOT_SUPPLIED" if epoch is None else "HB_EPOCH_INVALID")
+                self.assertFalse((self.mesh / "frames.d").exists())
+                for variable in self.LEDGER_ROOTS:
+                    self.assertFalse(Path(os.environ[variable]).exists(), variable)
+
+    def test_a_supplied_epoch_is_the_published_frames_heartbeat_reference(self):
+        emitted = egress.emit(PEER, diagnostic("epoch-frame-diagnostic"), standing=STANDING,
+                              capability=PROFILE_ID, mesh_root=self.mesh, hb_epoch="40")
+        self.assertEqual(emitted["disposition"], "ALLOW", emitted.get("detail"))
+        frame, = self.frames_to(PEER)
+        self.assertEqual(frame["heartbeat_reference"], kernel.hb_reference(epoch=40))
+        self.assertIs(frame["heartbeat_reference"]["derived_from_clock"], False)
+        self.assertNotIn("sampled_unix_ns", frame["heartbeat_reference"])
 
     def test_a_manifest_addressed_to_this_capability_is_not_a_diagnostic(self):
         self.publish({"manifest": {"probe": True}}, ADDRESS, "not-a-diagnostic")

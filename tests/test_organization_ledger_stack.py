@@ -254,6 +254,86 @@ class RedirectedStoreTests(unittest.TestCase):
         self.assertFalse((self.work / "repo").exists())
 
 
+    INVALID_EPOCHS = ("33.0", True, 31, "+33")
+
+    def _aggregate_refused_before_the_store_opens(self, name, **epoch):
+        os.environ["STEGVERSE_ORG_LEDGER_ROOT"] = str(self.work / "org")
+        aggregate = _module(name, "resident-runtime/aggregate_repo_transition.py")
+
+        def untouched(*_args, **_kwargs):
+            raise AssertionError("reached before the epoch was checked")
+
+        aggregate.open_store = untouched
+        aggregate.kernel.hb_reference = untouched
+        with self.assertRaises(aggregate.OrgLedgerEpochRefused) as raised:
+            aggregate.append({}, "REPO_STATE_PROPAGATION", "sha256:" + "a" * 64,
+                             "sha256:" + "b" * 64, {}, "NONE", **epoch)
+        refusal = raised.exception.refusal
+        for field in self.SIX_FIELDS:
+            self.assertTrue(refusal[field], field)
+        self.assertEqual(refusal["disposition"], "FAIL_CLOSED")
+        self.assertEqual(refusal["failed_predicate"], "SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH")
+        self.assertEqual(refusal["retry_entrypoint"], aggregate.EPOCH_RETRY_ENTRYPOINT)
+        self.assertIs(refusal["consequence_committed"], False)
+        self.assertEqual(refusal, aggregate.epoch_refusal(epoch.get("hb_epoch")))
+        self.assertFalse((self.work / "org").exists())
+        return refusal
+
+    def test_an_organization_append_without_a_supplied_epoch_fails_closed_before_the_store_opens(self):
+        refusal = self._aggregate_refused_before_the_store_opens("aggregate_epoch_absent")
+        self.assertEqual(refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+
+    def test_an_organization_append_with_an_invalid_epoch_fails_closed_before_the_store_opens(self):
+        for index, epoch in enumerate(self.INVALID_EPOCHS):
+            with self.subTest(epoch=epoch):
+                refusal = self._aggregate_refused_before_the_store_opens(
+                    "aggregate_epoch_invalid_%d" % index, hb_epoch=epoch)
+                self.assertEqual(refusal["failure_code"], "HB_EPOCH_INVALID")
+
+    def test_a_propagated_receipt_without_an_epoch_writes_neither_ledger(self):
+        # A caller that propagates a repository receipt through the dual
+        # ledger is refused by the organization append too, not only by the
+        # repository emitter in front of it.
+        os.environ["STEGVERSE_ORG_LEDGER_ROOT"] = str(self.work / "org")
+        ledger = _module("dual_ledger_epoch_absent", "resident-runtime/dual_ledger.py")
+        for index, epoch in enumerate((None, *self.INVALID_EPOCHS)):
+            with self.subTest(epoch=epoch):
+                with self.assertRaises(ValueError) as raised:
+                    ledger.append_organization(
+                        {"schema": "stegverse.repo-transition-receipt/v1"},
+                        "REPO_STATE_PROPAGATION", "sha256:" + "a" * 64, "sha256:" + "b" * 64,
+                        {}, "NONE", hb_epoch=epoch)
+                self.assertEqual(raised.exception.failed_predicate,
+                                 "SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH")
+                self.assertFalse((self.work / "org").exists())
+
+    def test_the_aggregator_command_refuses_without_an_epoch_and_writes_nothing(self):
+        self._aggregate_command_refuses(None, "HB_EPOCH_NOT_SUPPLIED")
+
+    def test_the_aggregator_command_refuses_an_invalid_epoch_and_writes_nothing(self):
+        for epoch in ("33.0", "31", "+33"):
+            with self.subTest(epoch=epoch):
+                self._aggregate_command_refuses(epoch, "HB_EPOCH_INVALID")
+
+    def _aggregate_command_refuses(self, epoch, failure_code):
+        source = self.work / "source.json"
+        source.write_text("{}", encoding="utf-8")
+        env = {**os.environ, "STEGVERSE_ORG_LEDGER_ROOT": str(self.work / "org")}
+        args = ["python3", str(ROOT / "resident-runtime/aggregate_repo_transition.py"),
+                "--repo-receipt", str(source),
+                "--predecessor-org-state-sha256", "sha256:" + "a" * 64,
+                "--successor-org-state-sha256", "sha256:" + "b" * 64]
+        if epoch is not None:
+            args += ["--hb-epoch", epoch]
+        run = subprocess.run(args, env=env, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        refusal = json.loads(run.stdout)
+        self.assertEqual(refusal["failure_code"], failure_code)
+        self.assertEqual(refusal["failed_predicate"], "SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH")
+        self.assertEqual(refusal["retry_entrypoint"],
+                         "resident-runtime/aggregate_repo_transition.py::append (hb_epoch=, or --hb-epoch)")
+        self.assertFalse((self.work / "org").exists())
+
 class TemporaryGitRefTests(unittest.TestCase):
     def setUp(self):
         self._work = tempfile.TemporaryDirectory()
