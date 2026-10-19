@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Organization-resident runtime boundary for GCAT-BCAT-Engine."""
 from __future__ import annotations
-import argparse, base64, hashlib, importlib.util, json
+import argparse, base64, hashlib, importlib.util, json, os, tempfile
 from pathlib import Path
 from typing import Any, Mapping
 ROOT=Path(__file__).resolve().parents[1]; CONFIG=ROOT/"control/organization-runtime.json"
@@ -25,11 +25,20 @@ def safe_id(v:str)->str:
     if not v or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in v): raise RuntimeBoundaryError("invalid id")
     return v
 def write_once(p:Path,v:Mapping[str,Any])->Path:
+    """Write once, atomically and resumably: a temp file then os.replace. A torn
+    earlier write that does not parse is replaced rather than refusing itself."""
     raw=json.dumps(dict(v),sort_keys=True,indent=2,ensure_ascii=False).encode()+b"\n"; p.parent.mkdir(parents=True,exist_ok=True)
     if p.exists():
         if p.read_bytes()==raw:return p
-        raise RuntimeBoundaryError("write-once collision")
-    p.write_bytes(raw)
+        try: json.loads(p.read_bytes().decode("utf-8"))
+        except ValueError: pass
+        else: raise RuntimeBoundaryError("write-once collision")
+    fd,temp=tempfile.mkstemp(prefix=".write-once-",suffix=".tmp",dir=str(p.parent))
+    try:
+        with os.fdopen(fd,"wb") as stream: stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temp,p)
+    finally:
+        if os.path.exists(temp): os.unlink(temp)
     if p.read_bytes()!=raw: raise RuntimeBoundaryError("write verification failed")
     return p
 def activate(activation_id:str,node_ref:str,hb_epoch:Any=None)->dict[str,Any]:

@@ -54,8 +54,20 @@ def main(argv:list[str]|None=None)->int:
         print(json.dumps(exc.refusal,sort_keys=True))
         return 1
     out=ROOT/"resident-runtime"/"federation"/"latest-cycle.json"
-    out.parent.mkdir(parents=True,exist_ok=True)
-    out.write_text(json.dumps(receipt,indent=2,sort_keys=True)+"\n")
+    try:
+        # Whole or not at all; every frame's own outcome is already durable on
+        # its seen marker, so the next run completes without redoing any.
+        K.write_json_atomic(out,receipt)
+    except OSError as exc:
+        print(json.dumps({"disposition":"FAIL_CLOSED","failure_code":"CYCLE_RECORD_WRITE_FAILED","terminal":False,
+                          "failed_predicate":"THIS_BOUNDARY_RECORDS_ITS_OWN_STATE",
+                          "detail":type(exc).__name__+": "+str(exc),
+                          "required_evidence_or_repair":"this boundary's own storage accepts the cycle record",
+                          "retry_entrypoint":EPOCH_RETRY_ENTRYPOINT,
+                          "owning_existing_goal":K.HB_EPOCH_OWNING_EXISTING_GOAL,
+                          "next_attempt":"run the cycle again; frames already marked are not redone",
+                          "consequence_committed":False},sort_keys=True))
+        return 1
     print(json.dumps(receipt,sort_keys=True))
     return 0
 

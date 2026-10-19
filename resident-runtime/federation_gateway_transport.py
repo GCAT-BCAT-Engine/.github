@@ -172,13 +172,10 @@ def _persist_response(repo_root: Path, packet: dict[str, Any], execution_result:
         "reconstruction": execution_result.get("reconstruction"),
         "authority_effect": execution_result.get("authority_effect"),
     }
-    path = out / name
-    if path.exists():
-        if json.loads(path.read_text()) != record:
-            raise FederationGatewayTransportError("response observation write-once collision")
-    else:
-        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
-    return path
+    try:
+        return K.write_once_json(out / name, record, collision="response observation write-once collision")
+    except ValueError as exc:
+        raise FederationGatewayTransportError(str(exc)) from None
 
 
 def _submitted_response_path(repo_root: Path, request_packet_id: str) -> Path:
@@ -187,19 +184,51 @@ def _submitted_response_path(repo_root: Path, request_packet_id: str) -> Path:
 
 
 def _submit_response_once(repo_root: Path, request_packet_id: str, response_frame: dict[str, Any]) -> dict[str, Any]:
-    """Submit a request's response once. A retried request reuses the recorded submission.
+    """Submit one response per request, resumable at every step.
 
-    The record is written after the gateway accepts the frame. So an
-    acknowledgement that fails afterwards leaves the request pending without a
-    second response for the same request packet id.
+    1. The response frame is recorded, atomically and marked unsubmitted,
+       before it is submitted.
+    2. It is submitted.
+    3. The record is marked submitted.
+
+    A fault at any step leaves the request pending. The retry reuses the
+    recorded frame: it resubmits the same bytes if step 3 had not happened,
+    and submits nothing if it had. So the gateway never sees a second,
+    different response for the same request packet id.
     """
     path = _submitted_response_path(repo_root, request_packet_id)
+    record = None
     if path.is_file():
-        return {"frame": json.loads(path.read_text(encoding="utf-8")), "reused": True}
+        try:
+            record = json.loads(path.read_bytes().decode("utf-8"))
+        except ValueError:
+            record = None
+    if isinstance(record, dict) and isinstance(record.get("frame"), dict):
+        frame = record["frame"]
+        if record.get("submitted") is not True:
+            submit_frame(frame)
+            K.write_json_atomic(path, {"frame": frame, "submitted": True})
+        return {"frame": frame, "reused": True}
+    K.write_json_atomic(path, {"frame": response_frame, "submitted": False})
     submit_frame(response_frame)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(response_frame, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    K.write_json_atomic(path, {"frame": response_frame, "submitted": True})
     return {"frame": response_frame, "reused": False}
+
+
+def _deferred_cycle(organization: str, frame: dict[str, Any], exc: BaseException,
+                    responses_emitted: int = 0, response_ref: str | None = None) -> dict[str, Any]:
+    """A gateway cycle left pending because this boundary's own write or the gateway failed."""
+    return {
+        "schema_version": "stegverse.org-federation-gateway-cycle.v1",
+        "organization": organization,
+        "state": "DEFERRED",
+        "refusal": K.dispatch_io_deferral(frame, exc if isinstance(exc, OSError) else OSError(str(exc)))["refusal"],
+        "packet_id": frame.get("packet_id") if isinstance(frame, dict) else None,
+        "frames_consumed": 0,
+        "responses_emitted": responses_emitted,
+        "response_frame_sha256": response_ref,
+        "gateway_execution_authority": "NONE",
+    }
 
 
 def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> dict[str, Any]:
@@ -245,14 +274,17 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
     if result.get("status") == "CONSUMED":
         execution = result["execution_result"]
         message_class = (packet.get("payload") or {}).get("message_class")
-        if message_class in {"ecosystem.monitor.request", "ecosystem.work.request", "ecosystem.communication"}:
-            response = K.build_control_response(packet, execution)
-            submitted = _submit_response_once(
-                repo_root, packet["packet_id"], K.carrier_frame(response, epoch=result["hb_epoch"]))
-            response_emitted = 0 if submitted["reused"] else 1
-            response_ref = submitted["frame"]["frame_sha256"]
-        elif message_class in {"ecosystem.monitor.response", "ecosystem.work.ack", "ecosystem.communication.ack"}:
-            _persist_response(repo_root, packet, execution)
+        try:
+            if message_class in {"ecosystem.monitor.request", "ecosystem.work.request", "ecosystem.communication"}:
+                response = K.build_control_response(packet, execution)
+                submitted = _submit_response_once(
+                    repo_root, packet["packet_id"], K.carrier_frame(response, epoch=result["hb_epoch"]))
+                response_emitted = 0 if submitted["reused"] else 1
+                response_ref = submitted["frame"]["frame_sha256"]
+            elif message_class in {"ecosystem.monitor.response", "ecosystem.work.ack", "ecosystem.communication.ack"}:
+                _persist_response(repo_root, packet, execution)
+        except (OSError, FederationGatewayTransportError) as exc:
+            return _deferred_cycle(organization, frame, exc)
         ack_state = "CONSUMED"
     else:
         ack_state = "BLOCKED"
@@ -262,17 +294,7 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
     except (OSError, FederationGatewayTransportError) as exc:
         # The ack is this boundary's own write: the frame stays pending, and the
         # retried request reuses the response it already submitted.
-        return {
-            "schema_version": "stegverse.org-federation-gateway-cycle.v1",
-            "organization": organization,
-            "state": "DEFERRED",
-            "refusal": K.dispatch_io_deferral(frame, exc if isinstance(exc, OSError) else OSError(str(exc)))["refusal"],
-            "packet_id": frame["packet_id"],
-            "frames_consumed": 0,
-            "responses_emitted": response_emitted,
-            "response_frame_sha256": response_ref,
-            "gateway_execution_authority": "NONE",
-        }
+        return _deferred_cycle(organization, frame, exc, response_emitted, response_ref)
     return {
         "schema_version": "stegverse.org-federation-gateway-cycle.v1",
         "organization": organization,

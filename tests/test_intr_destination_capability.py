@@ -2764,3 +2764,167 @@ class TornHeadWriteTests(CopiedRepository):
 
     def test_a_torn_repository_head_write_is_recovered(self):
         self.torn_then_once("STEGVERSE_REPO_LEDGER_ROOT", prime=True)
+
+
+class MultiStepWriteResumableTests(CopiedRepository):
+    """B-P36q: every multi-step durable write is atomic or idempotently resumable; a fault at any
+    step leaves state the next run completes exactly once, never state that refuses itself."""
+
+    def cycle(self):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_resumable", self.copy / "resident-runtime/federation_cycle.py"))
+        module.__spec__.loader.exec_module(module)
+        return module
+
+    def run_cycle(self, cycle, expected=0):
+        with mock.patch("builtins.print") as printed:
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), expected)
+        return printed
+
+    def latest(self):
+        return json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+
+    def failing_replace_once(self, predicate):
+        real_replace, failed = os.replace, []
+
+        def replace(source, destination, *args, **kwargs):
+            if not failed and predicate(str(destination)):
+                failed.append(destination)
+                raise OSError(28, "No space left on device")
+            return real_replace(source, destination, *args, **kwargs)
+        return mock.patch("os.replace", side_effect=replace), failed
+
+    def responses(self):
+        return [json.loads(path.read_text(encoding="utf-8")) for path in (self.mesh / "frames.d").glob("*.json")
+                if ":response:" in json.loads(path.read_text(encoding="utf-8"))["packet_id"]]
+
+    def monitor(self, packet_id):
+        control = next(row["service_id"] for row in REGISTRY["services"]
+                       if row["boundary_role"] == "BOUNDARY_LOCAL_CONTROL")
+        self.publish(control, {"communication_id": packet_id, "message_class": "ecosystem.monitor.request",
+                               "subject": "probe", "body": {}}, packet_id)
+
+    def test_a_fault_at_each_local_cycle_write_is_completed_once_by_the_next_run(self):
+        steps = {
+            "response frame": lambda destination: "frames.d" in destination,
+            "seen marker": lambda destination: "seen.d" in destination,
+            "cycle record": lambda destination: destination.endswith("latest-cycle.json"),
+        }
+        for index, (step, predicate) in enumerate(steps.items()):
+            packet_id = "probe-step-" + str(index)
+            self.monitor(packet_id)
+            cycle = self.cycle()
+            patcher, failed = self.failing_replace_once(predicate)
+            with patcher:
+                self.run_cycle(cycle, expected=1 if step == "cycle record" else 0)
+            self.assertTrue(failed, step)
+            self.run_cycle(cycle)
+            if step == "cycle record":
+                # The frame was already marked; the next run redoes nothing.
+                self.assertEqual(self.latest()["frames_seen"], 0)
+            else:
+                self.assertEqual(self.latest()["frames_consumed"], 1, step)
+            self.run_cycle(cycle)
+            self.assertEqual(self.latest()["frames_seen"], 0, step)
+            mine = [frame for frame in self.responses()
+                    if kernel.recover_packet(frame)["payload"]["body"]["request_packet_id"] == packet_id]
+            self.assertEqual(len(mine), 1, step)
+
+    def test_torn_documents_from_an_earlier_write_are_replaced_not_refused_forever(self):
+        self.monitor("probe-torn-marker")
+        work = next(row["service_id"] for row in REGISTRY["services"]
+                    if row["boundary_role"] == "BOUNDARY_LOCAL_CONTROL")
+        self.publish(work, {"communication_id": "probe-torn-intake", "message_class": "ecosystem.work.request",
+                            "subject": "probe", "body": {}}, "probe-torn-intake")
+        frames = {json.loads(path.read_text(encoding="utf-8"))["packet_id"]: path
+                  for path in (self.mesh / "frames.d").glob("*.json")}
+        seen = self.copy / "resident-runtime/federation/seen.d"
+        seen.mkdir(parents=True, exist_ok=True)
+        marker = seen / (hashlib.sha256(frames["probe-torn-marker"].name.encode()).hexdigest() + ".json")
+        marker.write_text('{"schema_version": "stegverse.federation-frame', encoding="utf-8")
+        inbox = self.copy / "resident-runtime/control/inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        intake = inbox / (hashlib.sha256(("probe-torn-intake|probe-torn-intake").encode()).hexdigest() + ".json")
+        intake.write_text('{"schema_version": "stegverse.ecosystem-work', encoding="utf-8")
+        cycle = self.cycle()
+        self.run_cycle(cycle)
+        self.assertEqual((self.latest()["frames_consumed"], self.latest()["frames_refused"]), (2, 0))
+        self.assertEqual(json.loads(marker.read_text(encoding="utf-8"))["status"], "CONSUMED")
+        self.assertEqual(json.loads(intake.read_text(encoding="utf-8"))["communication_id"], "probe-torn-intake")
+        self.run_cycle(cycle)
+        self.assertEqual(self.latest()["frames_seen"], 0)
+
+    def test_the_cycle_record_fault_is_six_field_and_non_terminal(self):
+        self.monitor("probe-record-fault")
+        cycle = self.cycle()
+        patcher, _failed = self.failing_replace_once(lambda destination: destination.endswith("latest-cycle.json"))
+        with patcher:
+            printed = self.run_cycle(cycle, expected=1)
+        refusal = json.loads(printed.call_args.args[0])
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("CYCLE_RECORD_WRITE_FAILED", False))
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, refusal)
+
+    def gateway(self):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "gateway_resumable", self.copy / "resident-runtime/federation_gateway_transport.py"))
+        module.__spec__.loader.exec_module(module)
+        return module
+
+    def test_a_fault_at_each_gateway_response_step_submits_one_response(self):
+        steps = ("record before submit", "submit", "record after submit")
+        for index, step in enumerate(steps):
+            gateway = self.gateway()
+            packet = kernel.build_packet(
+                origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+                destination_org=THIS, destination_service=ADDRESS,
+                payload=diagnostic("probe-gw-step-" + str(index)),
+                transition_reference="intr:transition:gw-step", authority_effect="NONE",
+                packet_id="probe-gw-step-" + str(index))
+            frame = kernel.carrier_frame(packet, epoch=4096)
+            submitted, writes = [], {"count": 0}
+            real_write = gateway.K.write_json_atomic
+
+            def write(path, value, step=step):
+                if "gateway-responses.d" in str(path):
+                    writes["count"] += 1
+                    if (step == "record before submit" and writes["count"] == 1) or \
+                            (step == "record after submit" and writes["count"] == 2):
+                        raise OSError(5, "I/O error")
+                return real_write(path, value)
+
+            def json_request(method, path, body=None, headers=None, step=step):
+                if path.endswith("/frames"):
+                    submitted.append(body)
+                    if step == "submit" and len(submitted) == 1:
+                        raise gateway.FederationGatewayTransportError("gateway request failed: reset")
+                    return {"state": "PENDING"}
+                return {"state": body["state"]}
+
+            with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
+                    mock.patch.object(gateway, "_json_request", side_effect=json_request), \
+                    mock.patch.object(gateway.K, "write_json_atomic", side_effect=write):
+                first = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+                self.assertEqual(first["state"], "DEFERRED", step)
+                self.assertIs(first["refusal"]["terminal"], False)
+                second = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+                third = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+            self.assertEqual(second["state"], "CONSUMED", step)
+            self.assertEqual(third["state"], "CONSUMED", step)
+            # One distinct response; a retried submission is the same bytes.
+            self.assertEqual(len({json.dumps(body, sort_keys=True) for body in submitted}), 1, step)
+            self.assertEqual(sum(1 for body in submitted if body) - (1 if step != "record before submit" else 0), 1, step)
+
+    def test_a_torn_runtime_receipt_is_replaced_not_a_permanent_collision(self):
+        runtime = _module("organization_runtime_torn", "runtime/organization_runtime.py")
+        for name in ("ACTIVATIONS", "INGRESS", "EGRESS"):
+            patcher = mock.patch.object(runtime, name, Path(self._work.name) / "runtime" / name.lower())
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        envelope = runtime.egress("probe-torn-runtime", "PROBE", {"boundary": "B", "subsystem": "S"}, b"x")
+        torn = Path(self._work.name) / "runtime" / "ingress" / "probe-torn-runtime.json"
+        torn.parent.mkdir(parents=True, exist_ok=True)
+        torn.write_text('{"schema": "stegverse.organization-interlock', encoding="utf-8")
+        received = runtime.ingress(envelope, "4096")
+        self.assertEqual(json.loads(torn.read_text(encoding="utf-8"))["receipt_hash"], received["receipt_hash"])
+        self.assertEqual(runtime.ingress(envelope, "4096"), received)

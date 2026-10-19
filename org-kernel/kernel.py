@@ -5,7 +5,7 @@ Organization-neutral runtime behavior extracted from StegVerse-Labs/.github.
 No GitHub, hosted scheduler, provider, or carrier sets authority. Authority and time are constraint variables; a disposition is transition evidence only.
 """
 from __future__ import annotations
-import base64, hashlib, importlib.util, json, os
+import base64, hashlib, importlib.util, json, os, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -256,14 +256,48 @@ def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None, hb_ep
             "authority_effect":packet["transition"]["authority_effect"],"receipts":receipts,
             "reconstruction":{"same_execution_required":True,"status":"RECONSTRUCTED","terminal_receipt_id":prev}}
 
-def persist_outbox(root:Path, frame:dict[str,Any])->Path:
-    out=root/"resident-runtime/federation/outbox"; out.mkdir(parents=True,exist_ok=True)
-    path=out/(hashlib.sha256(frame["packet_id"].encode()).hexdigest()+".json")
-    if path.exists():
-        if json.loads(path.read_text())!=frame: raise ValueError("write_once_collision")
-        return path
-    path.write_text(json.dumps(frame,indent=2,sort_keys=True)+"\n")
+def write_json_atomic(path:Path, value:Any)->Path:
+    """Write a JSON document whole or not at all: a temp file in the same
+    directory, fsynced, then os.replace. A fault part-way leaves the previous
+    document (or none), never a torn one."""
+    path.parent.mkdir(parents=True,exist_ok=True)
+    fd,temp=tempfile.mkstemp(prefix=".atomic-",suffix=".tmp",dir=str(path.parent))
+    try:
+        with os.fdopen(fd,"wb") as stream:
+            stream.write((json.dumps(value,indent=2,sort_keys=True)+"\n").encode("utf-8"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp,path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
     return path
+
+def write_once_json(path:Path, value:Any, *, collision:str)->Path:
+    """Write a write-once JSON document, idempotently resumable.
+
+    The same document already there is success. A different one is the
+    `collision`. One that does not parse is a torn earlier write of this
+    boundary's own, written before writes were atomic, and is replaced rather
+    than refusing itself forever.
+    """
+    if path.exists():
+        try:
+            existing=json.loads(path.read_bytes().decode("utf-8"))
+        except ValueError:
+            existing=_TORN
+        if existing is not _TORN:
+            if existing!=value:
+                raise ValueError(collision)
+            return path
+    return write_json_atomic(path,value)
+
+_TORN=object()
+
+def persist_outbox(root:Path, frame:dict[str,Any])->Path:
+    out=root/"resident-runtime/federation/outbox"
+    path=out/(hashlib.sha256(frame["packet_id"].encode()).hexdigest()+".json")
+    return write_once_json(path,frame,collision="write_once_collision")
 
 INGEST_EPOCH_RETRY_ENTRYPOINT="org-kernel/kernel.py::ingest_frame (the carrier frame's heartbeat_reference)"
 CARRIED_PROVENANCE_UNVERIFIED="CARRIED_PROVENANCE_UNVERIFIED"
@@ -444,7 +478,7 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
          "HB_EPOCH_PROVENANCE_UNMARKED","HB_EPOCH_CONFLICT","carried_frame_epoch","carried_provenance_failure",
          "carried_provenance_refusal","frame_provenance","ingest_or_quarantine","frame_failure_refusal",
-         "recorded_response",
+         "recorded_response","write_json_atomic","write_once_json",
          "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED","FRAME_DISPATCH_IO_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
          "supplied_epoch_failure","SHARED_VALIDATOR_SHA256","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
@@ -464,16 +498,8 @@ def federation_root(env:dict[str,str]|None=None)->Path:
 def publish_frame(frame:dict[str,Any], *, root:Path|None=None)->Path:
     mesh=(root or federation_root()).resolve()
     frames=mesh/"frames.d"
-    frames.mkdir(parents=True,exist_ok=True)
     frame_id=hashlib.sha256((frame["packet_id"]+"|"+frame["frame_sha256"]).encode()).hexdigest()
-    path=frames/(frame_id+".json")
-    if path.exists():
-        existing=json.loads(path.read_text())
-        if existing!=frame:
-            raise ValueError("federation_frame_write_once_collision")
-        return path
-    path.write_text(json.dumps(frame,indent=2,sort_keys=True)+"\n")
-    return path
+    return write_once_json(frames/(frame_id+".json"),frame,collision="federation_frame_write_once_collision")
 
 #: The declared size cap of one carrier frame file. A larger file is not read.
 MAX_CARRIER_FRAME_BYTES=1_048_576
@@ -680,11 +706,7 @@ def persist_work_request(root:Path, packet:dict[str,Any])->dict[str,Any]:
       "execution_authority_constraint":"CONSTRAINT_VARIABLE",
       "time_constraint":"CONSTRAINT_VARIABLE"
     }
-    if path.exists():
-        if json.loads(path.read_text())!=record:
-            raise ValueError("work_intake_write_once_collision")
-    else:
-        path.write_text(json.dumps(record,indent=2,sort_keys=True)+"\n")
+    write_once_json(path,record,collision="work_intake_write_once_collision")
     return {"state":record["state"],"intake_ref":str(path),"execution_authority_inferred":False}
 
 def handle_control_message(root:Path, packet:dict[str,Any], registry:dict[str,Any], *,
@@ -877,8 +899,15 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
             if result["hb_epoch"] is None:
                 result["response_refusal"]=writer_epoch_refusal(None,retry_entrypoint=CONSUME_EPOCH_RETRY_ENTRYPOINT)
             else:
-                response_publication=(recorded_response(response["packet_id"],packet["packet_id"],mesh_root=mesh_root)
-                                      or publish_packet(response,root=mesh_root,epoch=result["hb_epoch"]))
+                try:
+                    response_publication=(recorded_response(response["packet_id"],packet["packet_id"],mesh_root=mesh_root)
+                                          or publish_packet(response,root=mesh_root,epoch=result["hb_epoch"]))
+                except OSError as exc:
+                    # Publishing is this boundary's own write: no marker, so the
+                    # next cycle publishes the response once.
+                    out.append({"path":item["path"],"result":dispatch_io_deferral(item["frame"],exc),
+                                "response_publication":None,"seen_marker":None})
+                    continue
         try:
             marker=mark_federation_frame_seen(repo_root,item["path"],
                                               item["frame"] if isinstance(item["frame"],dict) else {},result)
@@ -1006,9 +1035,4 @@ def mark_federation_frame_seen(repo_root:Path, frame_path:str, frame:dict[str,An
     if isinstance(result.get("response_refusal"),dict):
         marker["response_refusal"]=dict(result["response_refusal"])
     marker_path=seen_dir/(hashlib.sha256(frame_name.encode()).hexdigest()+".json")
-    if marker_path.exists():
-        if json.loads(marker_path.read_text())!=marker:
-            raise ValueError("federation_seen_marker_collision")
-    else:
-        marker_path.write_text(json.dumps(marker,indent=2,sort_keys=True)+"\n")
-    return marker_path
+    return write_once_json(marker_path,marker,collision="federation_seen_marker_collision")
