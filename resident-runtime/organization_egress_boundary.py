@@ -338,13 +338,14 @@ def _record(transition_id: str, transition_class: str, predecessor: str, success
     repository_receipt = ledger.append_repository(
         transition_id, transition_class, predecessor, successor,
         dict(record), "NONE", hb_epoch=hb_epoch, idempotent_on=idempotent)
-    epoch = repository_receipt["hb_reference"]["epoch"]
+    # The supplied epoch is forwarded, not the repository receipt's: a replayed
+    # receipt carries an epoch this call was not supplied.
     organization_receipt = ledger.append_organization(
         repository_receipt, "REPO_STATE_PROPAGATION", predecessor, successor,
         {"operation": OPERATION_ID, "intended_action": record["intended_action"],
          "disposition": record["disposition"],
          "crossed_an_organization_boundary": record["crossed_an_organization_boundary"]},
-        "NONE", hb_epoch=epoch, idempotent=True)
+        "NONE", hb_epoch=hb_epoch, idempotent=True)
     return {"repository_receipt": repository_receipt,
             "organization_receipt": organization_receipt}
 

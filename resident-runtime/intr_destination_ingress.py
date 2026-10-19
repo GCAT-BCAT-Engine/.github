@@ -202,13 +202,15 @@ def _append(transition_class: str, packet_id: str, evidence: Mapping[str, Any],
         transition_id, transition_class, predecessor, successor, dict(evidence),
         "NONE", hb_epoch=hb_epoch,
         idempotent_on=("communication_id", "payload_sha256", "disposition"))
-    epoch = repository_receipt["hb_reference"]["epoch"]
+    # The organization receipt references the epoch this call was supplied,
+    # never one read back from the repository receipt: a replay returns the
+    # recorded receipt, whose epoch was not supplied to this call.
     organization_receipt = ledger.append_organization(
         repository_receipt, "REPO_STATE_PROPAGATION", predecessor, successor,
         {"operation": OPERATION_ID, "profile_id": PROFILE_ID,
          "disposition": evidence["disposition"],
          "communication_id": evidence.get("communication_id")},
-        "NONE", hb_epoch=epoch, idempotent=True)
+        "NONE", hb_epoch=hb_epoch, idempotent=True)
     return ({"repository_receipt": repository_receipt,
              "organization_receipt": organization_receipt}, prior is not None)
 
