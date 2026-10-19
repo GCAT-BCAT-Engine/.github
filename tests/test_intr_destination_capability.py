@@ -1964,7 +1964,9 @@ class AnyFrameFailureIsTerminalTests(CopiedRepository):
             self.assertEqual(refused[packet_id]["refusal"]["refused_failure_code"], code, packet_id)
             for field in SuppliedEpochParsingTests.SIX_FIELDS:
                 self.assertIn(field, refused[packet_id]["refusal"])
-        self.assertEqual(refused[None]["refusal"]["refused_failure_code"], "FRAME_INTEGRITY_INVALID")
+        self.assertEqual(refused[None]["refusal"]["refused_failure_code"], "FRAME_INGEST_FAILED")
+        self.assertEqual(refused[None]["refusal"]["failed_predicate"], "JSONDecodeError")
+        self.assertEqual(refused[None]["frame_name"], "unreadable.json")
         self.assertEqual(refused["probe-bad-adapter"]["refusal"]["failed_predicate"], "ValueError")
         # Only the valid frame reached the ledgers.
         repository = self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
@@ -2197,3 +2199,36 @@ class ClockFrameCarriedClaimTests(CopiedRepository):
         kernel.publish_frame({**frame, "packet_sha256": "sha256:" + "0" * 64}, root=self.mesh)
         self.assertEqual(kernel.collect_ecosystem_responses(THIS, "probe-collect", mesh_root=self.mesh)
                          ["response_count"], 0)
+
+
+class ScanGuardTests(CopiedRepository):
+    """F-SCAN: a malformed frames.d file is guarded on its own and quarantined by name."""
+
+    def test_malformed_files_do_not_block_the_cycle(self):
+        services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
+        self.publish(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "behind-malformed"}, "probe-behind-malformed")
+        directory = self.mesh / "frames.d"
+        (directory / "0-malformed.json").write_text("{not json", encoding="utf-8")
+        (directory / "1-not-an-object.json").write_text("[1, 2]", encoding="utf-8")
+        (directory / "2-not-utf8.json").write_bytes(b"\xff\xfe\x00")
+        cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_scan", self.copy / "resident-runtime/federation_cycle.py"))
+        cycle.__spec__.loader.exec_module(cycle)
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        latest = self.copy / "resident-runtime/federation/latest-cycle.json"
+        record = json.loads(latest.read_text(encoding="utf-8"))
+        self.assertEqual((record["frames_seen"], record["frames_consumed"], record["frames_refused"]), (4, 1, 3))
+        markers = {json.loads(path.read_text(encoding="utf-8"))["frame_name"]: json.loads(path.read_text(encoding="utf-8"))
+                   for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json")}
+        for name in ("0-malformed.json", "1-not-an-object.json", "2-not-utf8.json"):
+            self.assertEqual(markers[name]["status"], "REFUSED")
+            self.assertEqual(markers[name]["refusal"]["refused_failure_code"], "FRAME_INGEST_FAILED")
+            for field in SuppliedEpochParsingTests.SIX_FIELDS:
+                self.assertIn(field, markers[name]["refusal"])
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        self.assertEqual(json.loads(latest.read_text(encoding="utf-8"))["frames_seen"], 0)
+        # A scan that is not a consuming cycle skips them without raising.
+        self.assertEqual(kernel.scan_addressed_frames(THIS, root=self.mesh, seen=set())[0]["frame"]["packet_id"],
+                         "probe-behind-malformed")

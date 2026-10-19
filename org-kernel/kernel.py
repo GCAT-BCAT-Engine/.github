@@ -483,12 +483,15 @@ def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str
             continue
         try:
             frame=json.loads(path.read_text())
-        except ValueError:
-            # Unreadable: offered to a consuming cycle, which makes it terminal.
+            if not isinstance(frame,dict):
+                raise ValueError("carrier_frame_not_an_object")
+        except (ValueError,UnicodeDecodeError,OSError) as exc:
+            # Unreadable: each file is guarded on its own and offered to a
+            # consuming cycle, which quarantines it by name; it blocks no cycle.
             if include_unreadable:
-                out.append({"path":str(path),"frame":None})
+                out.append({"path":str(path),"frame":None,"load_error":exc})
             continue
-        if isinstance(frame,dict) and frame.get("destination_org")==organization:
+        if frame.get("destination_org")==organization:
             out.append({"path":str(path),"frame":frame})
     return out
 
@@ -757,7 +760,7 @@ def quarantine_result(frame:dict[str,Any], refusal:dict[str,Any])->dict[str,Any]
 FRAME_INTEGRITY_INVALID="FRAME_INTEGRITY_INVALID"
 FRAME_INGEST_FAILED="FRAME_INGEST_FAILED"
 FRAME_INTEGRITY_ERRORS={"carrier_frame_hash_mismatch","packet_hash_mismatch","packet_id_mismatch",
-                        "destination_org_mismatch","carrier_frame_not_an_object"}
+                        "destination_org_mismatch"}
 
 def frame_failure_refusal(exc:BaseException)->dict[str,Any]:
     """The six-field refusal of one frame's ingest failure, whatever raised it."""
@@ -810,7 +813,10 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
     out=[]
     for item in scan_addressed_frames(organization,root=mesh_root,seen=effective_seen,include_unreadable=True):
         # One frame's failure, of any kind, is that frame's terminal refusal.
-        packet,result=ingest_or_quarantine(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
+        if item.get("load_error") is not None:
+            packet,result=None,quarantine_result({},frame_failure_refusal(item["load_error"]))
+        else:
+            packet,result=ingest_or_quarantine(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
         message_class=((packet or {}).get("payload") or {}).get("message_class")
         response_publication=None
         if result.get("status")=="CONSUMED" and message_class in {
