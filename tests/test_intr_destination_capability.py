@@ -1129,3 +1129,51 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
             if root.exists():
                 found.extend(sorted(str(path) for path in root.rglob("*") if path.is_file()))
         return found
+
+
+class MarkerVocabularyTests(CopiedRepository):
+    """07:17Z marker vocabulary: a supplied epoch is SUPPLIED, and no clock is read for it.
+
+    SUPPLIED is derived_from_clock exactly false with no sampled_unix_ns. Every
+    kernel path that stamps a supplied 4096 does so with the clock patched to
+    raise, and the clock is never called.
+    """
+
+    def test_a_supplied_epoch_is_marked_supplied_and_reads_no_clock(self):
+        clock = mock.Mock(wraps=datetime)
+        clock.now = mock.Mock(side_effect=RuntimeError("clock unavailable"))
+        cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_vocabulary", self.copy / "resident-runtime/federation_cycle.py"))
+        cycle.__spec__.loader.exec_module(cycle)
+        for module in (kernel, cycle.K, cycle.GW):
+            patcher = mock.patch.object(module, "datetime", clock)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        packet = kernel.build_packet(
+            origin_org=THIS, origin_service=kernel.organization_slug(THIS) + ".org-control",
+            destination_org=PEER, destination_service=kernel.organization_slug(PEER) + ".org-control",
+            payload={"probe": "vocabulary"}, transition_reference="probe", authority_effect="NONE",
+            packet_id="probe-vocabulary")
+        references = [
+            kernel.hb_reference(epoch=4096),
+            kernel.supplied_hb_reference("4096", retry_entrypoint="probe"),
+            kernel.carrier_frame(packet, epoch=4096)["heartbeat_reference"],
+            kernel.publish_packet(packet, root=self.mesh, epoch="4096")["frame"]["heartbeat_reference"],
+        ]
+        self.publish(next(row["service_id"] for row in REGISTRY["services"]
+                          if row["boundary_role"] == "BOUNDARY_LOCAL_CONTROL"),
+                     {"communication_id": "probe-vocabulary-monitor",
+                      "message_class": "ecosystem.monitor.request", "subject": "probe", "body": {}},
+                     "probe-vocabulary-monitor")
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+        references.append(record["heartbeat_reference"])
+        for path in sorted((self.mesh / "frames.d").glob("*.json")):
+            references.append(json.loads(path.read_text(encoding="utf-8"))["heartbeat_reference"])
+        self.assertGreaterEqual(len(references), 7)
+        for reference in references:
+            self.assertEqual(reference["epoch"], 4096)
+            self.assertIs(reference["derived_from_clock"], False)
+            self.assertNotIn("sampled_unix_ns", reference)
+        self.assertEqual(clock.now.call_count, 0)
