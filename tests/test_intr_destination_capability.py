@@ -3838,11 +3838,13 @@ class ProcessBoundaryExitSplitTests(CopiedRepository):
 
     def test_run_once_makes_exit_1_and_unknown_codes_terminal(self):
         ingress, egress = self.write("ingress.json", self.envelope()), Path(self._work.name) / "egress" / "egress.json"
-        for status in (1, 3):
-            with self.subTest(status=status):
+        # Exit 1, an unknown code, and a crash (a processor that raises: a traceback, exit 1).
+        for status, body in ((1, "import sys\nsys.exit(1)\n"), (3, "import sys\nsys.exit(3)\n"),
+                             (1, "raise RuntimeError('processor crashed')\n")):
+            with self.subTest(status=status, body=body):
                 path = self.copy / "org-boundary/runtime/process_boundary.py"
                 original = path.read_text(encoding="utf-8")
-                path.write_text("import sys\nsys.exit(%d)\n" % status, encoding="utf-8")
+                path.write_text(body, encoding="utf-8")
                 try:
                     run = self.run_once(ingress, egress)
                 finally:
