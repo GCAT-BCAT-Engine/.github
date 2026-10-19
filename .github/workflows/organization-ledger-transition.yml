@@ -52,9 +52,8 @@ on:
         required: false
         default: ''
       hb_epoch:
-        description: 'optional heartbeat epoch; empty derives one from the clock'
-        required: false
-        default: ''
+        description: 'required heartbeat epoch: ASCII digits, value >= 32; never derived from the clock'
+        required: true
 
 permissions:
   contents: read
@@ -117,14 +116,34 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The dispatch hb_epoch is checked by the kernel's shared rule before
+      # anything else runs. An empty, absent or invalid one is the six-field
+      # writer_epoch_refusal, nothing is written, and no clock is read.
+      - name: Refuse an absent or invalid dispatch hb_epoch by the kernel's shared rule
+        env:
+          HB_EPOCH: ${{ github.event.inputs.hb_epoch }}
+        run: |
+          python - <<'PY'
+          import importlib.util, json, os, sys
+          spec = importlib.util.spec_from_file_location("kernel", "org-kernel/kernel.py")
+          kernel = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(kernel)
+          refusal = kernel.writer_epoch_refusal(
+              os.environ.get("HB_EPOCH"),
+              retry_entrypoint=".github/workflows/organization-ledger-transition.yml (workflow_dispatch hb_epoch)")
+          if refusal is not None:
+              print(json.dumps(refusal, sort_keys=True))
+              sys.exit(1)
+          print("DISPATCH_HB_EPOCH=SUPPLIED")
+          PY
+
       - name: Validate dispatch inputs and the ledger contract
         env:
           COMMUNICATION_ID: ${{ github.event.inputs.communication_id }}
           PACKET_ID: ${{ github.event.inputs.packet_id }}
-          HB_EPOCH: ${{ github.event.inputs.hb_epoch }}
         run: |
           python - <<'PY'
-          import json, os, re, sys
+          import json, os, sys
           from pathlib import Path
           def printable(name, value, required):
               if required and not value:
@@ -135,11 +154,6 @@ jobs:
                   sys.exit(1)
           printable("COMMUNICATION_ID", os.environ.get("COMMUNICATION_ID") or "", True)
           printable("PACKET_ID", os.environ.get("PACKET_ID") or "", False)
-          epoch = os.environ.get("HB_EPOCH") or ""
-          printable("HB_EPOCH", epoch, False)
-          if epoch and not re.fullmatch(r"[0-9]+", epoch):
-              print("FAIL_CLOSED: HB_EPOCH_NOT_AN_INTEGER", file=sys.stderr)
-              sys.exit(1)
           org = json.loads(Path(".stegverse/transition-ledger/org-contract.json").read_text())
           repo = json.loads(Path(".stegverse/transition-ledger/contract.json").read_text())["repository_ledger_location"]
           assert org["organization_ledger_repository"] == "GCAT-BCAT-Engine/.github"
@@ -179,12 +193,10 @@ jobs:
             --communication-id "$COMMUNICATION_ID"
             --registry org-boundary/registry/services.json
             --out "$RUNNER_TEMP/results/closure.json"
+            --hb-epoch "$HB_EPOCH"
           )
           if [ -n "${PACKET_ID:-}" ]; then
             args+=(--packet-id "$PACKET_ID")
-          fi
-          if [ -n "${HB_EPOCH:-}" ]; then
-            args+=(--hb-epoch "$HB_EPOCH")
           fi
           python resident-runtime/intr_destination_ingress.py "${args[@]}"
           python - <<'PY'

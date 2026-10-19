@@ -133,6 +133,61 @@ class ContractAndBoundaryTests(unittest.TestCase):
             kernel.hb_reference(sample, epoch=32)
 
 
+WORKFLOW = ".github/workflows/organization-ledger-transition.yml"
+WORKFLOW_EPOCH_STEP = "      - name: Refuse an absent or invalid dispatch hb_epoch by the kernel's shared rule\n"
+SIX_FIELDS = ("failure_code", "failed_predicate", "required_evidence_or_repair",
+              "retry_entrypoint", "owning_existing_goal", "next_attempt")
+
+
+def _workflow_epoch_check():
+    """The dispatch epoch step's own inline check, as the workflow runs it."""
+    text = (ROOT / WORKFLOW).read_text(encoding="utf-8")
+    step = text[text.index(WORKFLOW_EPOCH_STEP):]
+    body = step[step.index("python - <<'PY'\n") + len("python - <<'PY'\n"):]
+    body = body[:body.index("\n          PY\n")]
+    return "\n".join(line[10:] for line in body.split("\n")) + "\n"
+
+
+class WorkflowEpochGateTests(unittest.TestCase):
+    def _run(self, value):
+        env = {key: item for key, item in os.environ.items() if key != "HB_EPOCH"}
+        if value is not None:
+            env["HB_EPOCH"] = value
+        return subprocess.run(["python", "-c", _workflow_epoch_check()], cwd=ROOT, env=env,
+                              capture_output=True, text=True)
+
+    def test_the_dispatch_epoch_step_emits_the_kernel_six_field_refusal(self):
+        cases = {"": "HB_EPOCH_INVALID", None: "HB_EPOCH_NOT_SUPPLIED",
+                 "\uff13\uff13": "HB_EPOCH_INVALID", "\u0663\u0663": "HB_EPOCH_INVALID",
+                 "+33": "HB_EPOCH_INVALID", " 33": "HB_EPOCH_INVALID", "33.0": "HB_EPOCH_INVALID",
+                 "31": "HB_EPOCH_INVALID", "abc": "HB_EPOCH_INVALID"}
+        for value, code in cases.items():
+            with self.subTest(value=value):
+                run = self._run(value)
+                self.assertEqual(run.returncode, 1, run.stderr)
+                self.assertNotIn("Traceback", run.stderr)
+                refusal = json.loads(run.stdout)
+                self.assertEqual(refusal["disposition"], "FAIL_CLOSED")
+                self.assertEqual(refusal["failure_code"], code)
+                for field in SIX_FIELDS:
+                    self.assertTrue(refusal[field], field)
+                self.assertEqual(refusal["retry_entrypoint"],
+                                 WORKFLOW + " (workflow_dispatch hb_epoch)")
+                self.assertIs(refusal["derived_from_clock"], False)
+                self.assertIs(refusal["consequence_committed"], False)
+
+    def test_the_dispatch_epoch_step_passes_a_supplied_epoch(self):
+        run = self._run("4096")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(run.stdout.strip(), "DISPATCH_HB_EPOCH=SUPPLIED")
+
+    def test_the_workflow_carries_no_other_epoch_gate(self):
+        text = (ROOT / WORKFLOW).read_text(encoding="utf-8")
+        self.assertNotIn("HB_EPOCH_NOT_AN_INTEGER", text)
+        self.assertNotIn("DISPATCH_HB_EPOCH_INVALID", text)
+        self.assertNotIn("derives one from the clock", text)
+        self.assertEqual(text.count("kernel.writer_epoch_refusal("), 1)
+
 class RedirectedStoreTests(unittest.TestCase):
     def setUp(self):
         self._work = tempfile.TemporaryDirectory()
