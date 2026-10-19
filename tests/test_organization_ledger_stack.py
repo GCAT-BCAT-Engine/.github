@@ -189,38 +189,68 @@ class RedirectedStoreTests(unittest.TestCase):
         self.assertEqual(found["hb_reference"]["epoch"], 32)
 
 
-    def test_an_append_without_a_supplied_epoch_fails_closed_before_the_store_opens(self):
+    SIX_FIELDS = ("failure_code", "failed_predicate", "required_evidence_or_repair",
+                  "retry_entrypoint", "owning_existing_goal", "next_attempt")
+
+    def _refused_before_the_store_opens(self, name, **epoch):
         os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = str(self.work / "repo")
-        emit = _module("emit_epoch_required", ".stegverse/transition-ledger/emit.py")
+        emit = _module(name, ".stegverse/transition-ledger/emit.py")
 
         def untouched(*_args, **_kwargs):
             raise AssertionError("reached before the epoch was checked")
 
         emit.ledger_store.open_store = untouched
         emit.kernel.hb_reference = untouched
-        with self.assertRaises(emit.EpochNotSupplied) as raised:
-            emit.append("no-epoch", "CLASS", "sha256:" + "a" * 64, "sha256:" + "b" * 64, {}, "NONE")
-        refusal = emit.epoch_refusal(raised.exception)
-        for field in ("failure_code", "failed_predicate", "required_evidence_or_repair",
-                      "retry_entrypoint", "owning_existing_goal", "next_attempt"):
+        with self.assertRaises(emit.RepoLedgerEpochRefused) as raised:
+            emit.append("epoch-refused", "CLASS", "sha256:" + "a" * 64, "sha256:" + "b" * 64,
+                        {}, "NONE", **epoch)
+        refusal = raised.exception.refusal
+        for field in self.SIX_FIELDS:
             self.assertTrue(refusal[field], field)
-        self.assertEqual(refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
         self.assertEqual(refusal["disposition"], "FAIL_CLOSED")
+        self.assertEqual(refusal["failed_predicate"], "SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH")
+        self.assertEqual(refusal["owning_existing_goal"],
+                         "INTERLOCK-INTR-RUNTIME-INDEPENDENT-PROTOCOL-001")
         self.assertIs(refusal["consequence_committed"], False)
+        self.assertEqual(refusal, emit.kernel.writer_epoch_refusal(
+            epoch.get("hb_epoch"), retry_entrypoint=emit.EPOCH_RETRY_ENTRYPOINT))
         self.assertFalse((self.work / "repo").exists())
+        return refusal
+
+    def test_an_append_without_a_supplied_epoch_fails_closed_before_the_store_opens(self):
+        refusal = self._refused_before_the_store_opens("emit_epoch_absent")
+        self.assertEqual(refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+
+    def test_an_append_with_an_invalid_epoch_fails_closed_before_the_store_opens(self):
+        for index, epoch in enumerate(("33.0", True, 31, "+33", 33.0, " 33", "3_3")):
+            with self.subTest(epoch=epoch):
+                refusal = self._refused_before_the_store_opens(
+                    "emit_epoch_invalid_%d" % index, hb_epoch=epoch)
+                self.assertEqual(refusal["failure_code"], "HB_EPOCH_INVALID")
 
     def test_the_emitter_command_refuses_without_an_epoch_and_writes_nothing(self):
+        self._command_refuses(None, "HB_EPOCH_NOT_SUPPLIED")
+
+    def test_the_emitter_command_refuses_an_invalid_epoch_and_writes_nothing(self):
+        for epoch in ("33.0", "31", "+33"):
+            with self.subTest(epoch=epoch):
+                self._command_refuses(epoch, "HB_EPOCH_INVALID")
+
+    def _command_refuses(self, epoch, failure_code):
         env = {**os.environ, "STEGVERSE_REPO_LEDGER_ROOT": str(self.work / "repo")}
-        run = subprocess.run(
-            ["python3", str(ROOT / ".stegverse/transition-ledger/emit.py"),
-             "--transition-id", "no-epoch", "--transition-class", "CLASS",
-             "--predecessor-state-sha256", "sha256:" + "a" * 64,
-             "--successor-state-sha256", "sha256:" + "b" * 64],
-            env=env, capture_output=True, text=True)
+        args = ["python3", str(ROOT / ".stegverse/transition-ledger/emit.py"),
+                "--transition-id", "epoch-refused", "--transition-class", "CLASS",
+                "--predecessor-state-sha256", "sha256:" + "a" * 64,
+                "--successor-state-sha256", "sha256:" + "b" * 64]
+        if epoch is not None:
+            args += ["--hb-epoch", epoch]
+        run = subprocess.run(args, env=env, capture_output=True, text=True)
         self.assertEqual(run.returncode, 1, run.stderr)
         refusal = json.loads(run.stdout)
-        self.assertEqual(refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
-        self.assertEqual(refusal["retry_entrypoint"], ".stegverse/transition-ledger/emit.py::append")
+        self.assertEqual(refusal["failure_code"], failure_code)
+        self.assertEqual(refusal["failed_predicate"], "SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH")
+        self.assertEqual(refusal["retry_entrypoint"],
+                         ".stegverse/transition-ledger/emit.py::append (hb_epoch=, or --hb-epoch)")
         self.assertFalse((self.work / "repo").exists())
 
 

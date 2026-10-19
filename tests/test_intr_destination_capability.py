@@ -337,7 +337,7 @@ class AddressedAndClosedTests(RedirectedLedgers):
         with self.assertRaises(ValueError) as refused:
             self.consume()
         self.assertEqual(getattr(refused.exception, "failed_predicate", None),
-                         "HB_EPOCH_SUPPLIED_BY_CALLER")
+                         "SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH")
         self.assertEqual(self.receipts(
             "STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1"), [])
         self.assertEqual(self.receipts(
