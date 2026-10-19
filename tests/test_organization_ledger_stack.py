@@ -189,6 +189,41 @@ class RedirectedStoreTests(unittest.TestCase):
         self.assertEqual(found["hb_reference"]["epoch"], 32)
 
 
+    def test_an_append_without_a_supplied_epoch_fails_closed_before_the_store_opens(self):
+        os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = str(self.work / "repo")
+        emit = _module("emit_epoch_required", ".stegverse/transition-ledger/emit.py")
+
+        def untouched(*_args, **_kwargs):
+            raise AssertionError("reached before the epoch was checked")
+
+        emit.ledger_store.open_store = untouched
+        emit.kernel.hb_reference = untouched
+        with self.assertRaises(emit.EpochNotSupplied) as raised:
+            emit.append("no-epoch", "CLASS", "sha256:" + "a" * 64, "sha256:" + "b" * 64, {}, "NONE")
+        refusal = emit.epoch_refusal(raised.exception)
+        for field in ("failure_code", "failed_predicate", "required_evidence_or_repair",
+                      "retry_entrypoint", "owning_existing_goal", "next_attempt"):
+            self.assertTrue(refusal[field], field)
+        self.assertEqual(refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        self.assertEqual(refusal["disposition"], "FAIL_CLOSED")
+        self.assertIs(refusal["consequence_committed"], False)
+        self.assertFalse((self.work / "repo").exists())
+
+    def test_the_emitter_command_refuses_without_an_epoch_and_writes_nothing(self):
+        env = {**os.environ, "STEGVERSE_REPO_LEDGER_ROOT": str(self.work / "repo")}
+        run = subprocess.run(
+            ["python3", str(ROOT / ".stegverse/transition-ledger/emit.py"),
+             "--transition-id", "no-epoch", "--transition-class", "CLASS",
+             "--predecessor-state-sha256", "sha256:" + "a" * 64,
+             "--successor-state-sha256", "sha256:" + "b" * 64],
+            env=env, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        refusal = json.loads(run.stdout)
+        self.assertEqual(refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        self.assertEqual(refusal["retry_entrypoint"], ".stegverse/transition-ledger/emit.py::append")
+        self.assertFalse((self.work / "repo").exists())
+
+
 class TemporaryGitRefTests(unittest.TestCase):
     def setUp(self):
         self._work = tempfile.TemporaryDirectory()
