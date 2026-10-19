@@ -2492,68 +2492,80 @@ class TransientWriterFaultTests(CopiedRepository):
         self.assert_deferred_then_once(os.environ["STEGVERSE_ORG_LEDGER_ROOT"], "probe-lost-org", 1)
 
 
-class CarriedAdmissionRecordTests(CopiedRepository):
-    """B-P36m propagation (lead 09:00Z): writers verify against the crossing's admission record."""
+class CarriedWriterVerificationTests(CopiedRepository):
+    """B-P36m writers (lead 09:00Z, VALIDATOR V-P11): every writer verifies a carried claim
+    against the current organization head, as ingest does; no caller-supplied record widens it.
+
+    N/A for the admission-record form: a GCAT crossing writes one repository
+    receipt and then its one organization receipt, last
+    (intr_destination_ingress._append), and the repository write does not move
+    the organization HEAD, so the HEAD each writer sees is the one ingest admitted.
+    """
 
     def ledger_files(self):
-        return sorted(str(path) for name in self.LEDGER_ROOTS
+        return sorted(str(path) for name in self.LEDGER_ROOTS if Path(os.environ[name]).exists()
                       for path in Path(os.environ[name]).rglob("*") if path.is_file())
 
     def head(self):
         return json.loads((Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]) / "HEAD.json").read_text())["receipt_sha256"]
 
-    def admitted_head(self):
-        received = ingress.receive(diagnostic("probe-admission-head"), registry=REGISTRY,
-                                   packet_id="probe-admission-head", hb_epoch=4096)
-        self.assertEqual(received["disposition"], "ALLOW", received.get("detail"))
-        return self.head()
+    def receive(self, packet_id, hb_epoch, provenance=None):
+        return ingress.receive(diagnostic(packet_id), registry=REGISTRY, packet_id=packet_id,
+                               hb_epoch=hb_epoch, hb_provenance=provenance)
 
-    def test_receipts_after_the_head_moved_in_the_crossing_still_carry_the_admission_head(self):
-        admission = self.admitted_head()
-        provenance = {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admission,
-                      "admission_head_receipt_sha": admission}
-        written = []
-        for packet_id in ("probe-admission-first", "probe-admission-second"):
-            result = ingress.receive(diagnostic(packet_id), registry=REGISTRY, packet_id=packet_id,
-                                     hb_epoch=4096, hb_provenance=provenance)
-            self.assertEqual(result["disposition"], "ALLOW", result.get("detail"))
-            written += [result["repository_receipt_sha256"], result["organization_receipt_sha256"]]
-        # The head moved twice within the crossing; an admission-time check would now refuse.
-        self.assertNotEqual(self.head(), admission)
-        self.assertIsNotNone(kernel.carried_provenance_failure(
-            {"epoch": 4096, "derived_from_clock": False, "source": "ORGANIZATION_LEDGER_HEAD",
-             "head_receipt_sha": admission}))
+    def test_a_verified_crossing_keeps_source_and_sha_on_both_receipts(self):
+        self.assertEqual(self.receive("probe-writer-head", 4096)["disposition"], "ALLOW")
+        admitted = self.head()
+        provenance = {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admitted}
+        result = self.receive("probe-writer-crossing", 4096, provenance)
+        self.assertEqual(result["disposition"], "ALLOW", result.get("detail"))
         receipts = {receipt["receipt_sha256"]: receipt for receipt in
                     self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
                     + self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1")}
-        self.assertEqual(len(written), 4)
-        for digest in written:
+        for digest in (result["repository_receipt_sha256"], result["organization_receipt_sha256"]):
             reference = receipts[digest]["hb_reference"]
             self.assertEqual((reference["source"], reference["head_receipt_sha"]),
-                             ("ORGANIZATION_LEDGER_HEAD", admission))
-            self.assertIs(reference["derived_from_clock"], False)
-            self.assertEqual(reference["epoch"], 4096)
-            self.assertNotIn("admission_head_receipt_sha", reference)
+                             ("ORGANIZATION_LEDGER_HEAD", admitted))
+            self.assertEqual((reference["epoch"], reference["derived_from_clock"]), (4096, False))
 
-    def test_a_writer_refuses_a_forged_or_unadmitted_head(self):
-        admission = self.admitted_head()
+    def test_a_caller_supplied_older_chain_member_is_refused_at_every_writer(self):
+        self.assertEqual(self.receive("probe-older", 1000)["disposition"], "ALLOW")
+        older = self.head()
+        self.assertEqual(self.receive("probe-current", 4096)["disposition"], "ALLOW")
+        self.assertNotEqual(self.head(), older)
         before = self.ledger_files()
-        forged = "sha256:" + "f" * 64
-        for provenance in ({"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": forged,
-                            "admission_head_receipt_sha": forged},
-                           {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admission,
-                            "admission_head_receipt_sha": forged},
-                           {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admission}):
+        provenance = {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": older,
+                      "admission_head_receipt_sha": older}
+        repository, = [receipt for receipt in self.receipts(
+            "STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+            if receipt["evidence"]["communication_id"] == "probe-current"]
+        calls = (
+            lambda: kernel.supplied_hb_reference(1000, retry_entrypoint="probe", provenance=provenance),
+            lambda: ingress.ledger.emit.append("probe:older", "PROBE", kernel.sha({"p": 1}), kernel.sha({"p": 2}),
+                                               {}, "NONE", hb_epoch=1000, hb_provenance=provenance),
+            lambda: ingress.ledger.append_repository("probe:older", "PROBE", kernel.sha({"p": 1}),
+                                                     kernel.sha({"p": 2}), {}, "NONE", hb_epoch=1000,
+                                                     hb_provenance=provenance),
+            lambda: ingress.ledger.append_organization(repository, "REPO_STATE_PROPAGATION", "FROM_HEAD",
+                                                       kernel.sha({"p": 3}), {}, "NONE", hb_epoch=1000,
+                                                       hb_provenance=provenance),
+            lambda: ingress.ledger.aggregate.append(repository, "REPO_STATE_PROPAGATION", "FROM_HEAD",
+                                                    kernel.sha({"p": 3}), {}, "NONE", hb_epoch=1000,
+                                                    hb_provenance=provenance),
+            lambda: self.receive("probe-older-crossing", 1000, provenance),
+        )
+        for call in calls:
             with self.assertRaises(ValueError) as refused:
-                ingress.receive(diagnostic("probe-forged-writer"), registry=REGISTRY,
-                                packet_id="probe-forged-writer", hb_epoch=4096, hb_provenance=provenance)
+                call()
             self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
-        # The epoch must still be the admitted head's.
+        self.assertEqual(self.ledger_files(), before)
+
+    def test_a_forged_sha_is_refused_with_nothing_written(self):
+        self.assertEqual(self.receive("probe-forged-head", 4096)["disposition"], "ALLOW")
+        before = self.ledger_files()
         with self.assertRaises(ValueError) as refused:
-            ingress.receive(diagnostic("probe-epoch-writer"), registry=REGISTRY, packet_id="probe-epoch-writer",
-                            hb_epoch=4097, hb_provenance={"source": "ORGANIZATION_LEDGER_HEAD",
-                                                          "head_receipt_sha": admission,
-                                                          "admission_head_receipt_sha": admission})
+            self.receive("probe-forged-writer", 4096, {"source": "ORGANIZATION_LEDGER_HEAD",
+                                                       "head_receipt_sha": "sha256:" + "f" * 64})
         self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
         self.assertEqual(self.ledger_files(), before)
 
@@ -2663,3 +2675,92 @@ class ResponsePublishedOnceTests(CopiedRepository):
         self.assertEqual(len(submitted), 1)
         self.assertEqual(len(acks), 2)
         self.assertEqual(second["response_frame_sha256"], submitted[0]["frame_sha256"])
+
+
+class TornHeadWriteTests(CopiedRepository):
+    """IO-TORN (VALIDATOR V-P11): an OSError writing HEAD after the receipt is published leaves the
+    ledger appendable; the next cycle consumes the frame once, with no orphan."""
+
+    def setUp(self):
+        super().setUp()
+        self.tear = None
+        test = self
+
+        def tearing(original):
+            def put(store, key, value):
+                if (test.tear is not None and key == "HEAD.json"
+                        and str(Path(store.root).resolve()).startswith(test.tear)):
+                    test.tear = None
+                    raise OSError(5, "I/O error writing HEAD")
+                return original(store, key, value)
+            put.__torn_original__ = original
+            return put
+
+        def patch_store_classes(module):
+            store = getattr(module, "PosixLedgerStore", None)
+            if store is not None and not hasattr(store.put, "__torn_original__"):
+                original = store.put
+                store.put = tearing(original)
+                self.addCleanup(setattr, store, "put", original)
+
+        for module in list(sys.modules.values()):
+            patch_store_classes(module)
+        real_exec = importlib.machinery.SourceFileLoader.exec_module
+
+        def exec_module(loader, module):
+            real_exec(loader, module)
+            patch_store_classes(module)
+        patcher = mock.patch.object(importlib.machinery.SourceFileLoader, "exec_module", exec_module)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    cycle = TransientWriterFaultTests.cycle
+    run_cycle = TransientWriterFaultTests.run_cycle
+    marker = TransientWriterFaultTests.marker
+    ledgers = TransientWriterFaultTests.ledgers
+
+    def assert_chain_has_no_orphan(self, variable):
+        root = Path(os.environ[variable])
+        cursor = json.loads((root / "HEAD.json").read_text())["receipt_sha256"]
+        reachable = set()
+        while cursor:
+            name = cursor.split(":", 1)[1] + ".json"
+            reachable.add(name)
+            cursor = json.loads((root / "receipts" / name).read_text()).get("previous_receipt_sha256")
+        self.assertEqual({path.name for path in (root / "receipts").glob("*.json")}, reachable)
+
+    def torn_then_once(self, variable, prime):
+        cycle = self.cycle()
+        if prime:
+            self.publish(ADDRESS, diagnostic("probe-torn-prime"), "probe-torn-prime")
+            self.assertEqual(self.run_cycle(cycle)["frames_consumed"], 1)
+        packet_id = "probe-torn-" + variable.lower().replace("_", "-") + ("" if prime else "-genesis")
+        self.publish(ADDRESS, diagnostic(packet_id), packet_id)
+        self.tear = str(Path(os.environ[variable]).resolve())
+        record = self.run_cycle(cycle)
+        self.assertIsNone(self.tear)
+        self.assertEqual((record["frames_consumed"], record["frames_refused"], record["frames_deferred"]), (0, 0, 1))
+        self.assertIsNone(self.marker(packet_id))
+        record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_consumed"], record["frames_refused"], record["frames_deferred"]), (1, 0, 0))
+        self.assertEqual(self.marker(packet_id)["status"], "CONSUMED")
+        expected = 2 if prime else 1
+        repository, organization = self.ledgers()
+        self.assertEqual((len(repository), len(organization)), (expected, expected))
+        for name in self.LEDGER_ROOTS:
+            self.assert_chain_has_no_orphan(name)
+        # Later frames are unaffected.
+        self.publish(ADDRESS, diagnostic(packet_id + "-later"), packet_id + "-later")
+        record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_consumed"], record["frames_refused"]), (1, 0))
+        repository, organization = self.ledgers()
+        self.assertEqual((len(repository), len(organization)), (expected + 1, expected + 1))
+
+    def test_a_torn_organization_head_write_is_recovered(self):
+        self.torn_then_once("STEGVERSE_ORG_LEDGER_ROOT", prime=True)
+
+    def test_a_torn_organization_genesis_head_write_is_recovered(self):
+        self.torn_then_once("STEGVERSE_ORG_LEDGER_ROOT", prime=False)
+
+    def test_a_torn_repository_head_write_is_recovered(self):
+        self.torn_then_once("STEGVERSE_REPO_LEDGER_ROOT", prime=True)

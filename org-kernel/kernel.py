@@ -146,11 +146,10 @@ def writer_epoch_refusal(hb_epoch:Any, *, retry_entrypoint:str, reference:Any=No
 def supplied_hb_reference(hb_epoch:Any, *, retry_entrypoint:str, provenance:dict[str,Any]|None=None)->dict[str,Any]:
     """The heartbeat reference of a supplied epoch, or SuppliedEpochRefused. No clock is read.
 
-    With `provenance` (a CARRIED claim's `source` and `head_receipt_sha`, and
-    the crossing's admission record `admission_head_receipt_sha`), the writer
-    verifies the claim itself: chain membership, the digest, the epoch, and
-    identity with the admission head. It is kept on the reference, and one
-    that does not verify is CARRIED_PROVENANCE_UNVERIFIED.
+    With `provenance` (a CARRIED claim's `source` and `head_receipt_sha`), the
+    writer verifies the claim itself against the current organization ledger
+    head, exactly as ingest does. It is kept on the reference, and one that
+    does not verify is CARRIED_PROVENANCE_UNVERIFIED.
     """
     refusal=writer_epoch_refusal(hb_epoch,retry_entrypoint=retry_entrypoint)
     if refusal is not None:
@@ -159,10 +158,7 @@ def supplied_hb_reference(hb_epoch:Any, *, retry_entrypoint:str, provenance:dict
     if provenance is not None:
         claim={"epoch":epoch,"derived_from_clock":False,
                **{key:provenance.get(key) for key in CARRIED_PROVENANCE_FIELDS}}
-        admission=provenance.get("admission_head_receipt_sha")
-        unverified=("the provenance carries no admission record (admission_head_receipt_sha)"
-                    if not isinstance(admission,str) else
-                    carried_provenance_failure(claim,admission_head=admission))
+        unverified=carried_provenance_failure(claim)
         if unverified is not None:
             raise SuppliedEpochRefused(carried_provenance_refusal(unverified,retry_entrypoint))
     return hb_reference(epoch=epoch,provenance=provenance)
@@ -293,21 +289,19 @@ def carried_provenance_refusal(detail:str, retry_entrypoint:str)->dict[str,Any]:
             "next_attempt":"re-emit with a verifiable claim or a supplied epoch; nothing was written",
             "derived_from_clock":False,"consequence_committed":False}
 
-def carried_provenance_failure(reference:dict[str,Any], *, admission_head:str|None=None)->str|None:
+def carried_provenance_failure(reference:dict[str,Any])->str|None:
     """Why a carrier's CARRIED claim does not verify, or None when it makes none or verifies.
 
     A reference naming `source` or `head_receipt_sha` claims its epoch was read
-    from the organization ledger head. It is read without writing, and the
-    source must be ORGANIZATION_LEDGER_HEAD. Two checks apply:
-    - With no `admission_head`, this is the ADMISSION check made at ingest:
-      the sha must be the current HEAD.
-    - With one, this is a downstream writer in the same crossing. The sha must
-      be the head recorded in the crossing's admission record and a member of
-      the ledger chain, so a write earlier in the crossing that moved the head
-      does not refuse a later one.
-    Either way the receipt must be bound by its digest, its own reference must
-    pass the shared rule, and the epochs must agree. A claim is never stripped
-    and the frame accepted as supplied.
+    from the organization ledger head. It is verified against that head, read
+    without writing: the source is ORGANIZATION_LEDGER_HEAD, the sha is the
+    current HEAD, the head receipt is bound by its digest, its own reference
+    passes the shared rule, and the epochs agree. Ingest and every writer
+    check the same thing, and no caller-supplied record widens it. A GCAT
+    crossing writes one repository receipt and then its one organization
+    receipt, last, and the repository write does not move the organization
+    HEAD, so the HEAD a writer sees is the one ingest admitted. A claim is
+    never stripped and the frame accepted as supplied.
     """
     if not any(field in reference for field in CARRIED_PROVENANCE_FIELDS):
         return None
@@ -322,19 +316,8 @@ def carried_provenance_failure(reference:dict[str,Any], *, admission_head:str|No
     store_module=_ledger_store()
     store=store_module.open_store(store_module.parse_locator(location))
     head=store.get(store_module.HEAD_KEY)
-    current=head.get("receipt_sha256") if isinstance(head,dict) else None
-    if admission_head is None:
-        if current!=claimed:
-            return "the carried head_receipt_sha is not the current organization ledger head"
-    else:
-        if claimed!=admission_head:
-            return "the carried head_receipt_sha is not the head this crossing was admitted at"
-        cursor,seen=current,set()
-        while cursor and cursor!=claimed and cursor not in seen:
-            seen.add(cursor)
-            cursor=(store.get(store_module.receipt_key(cursor)) or {}).get("previous_receipt_sha256")
-        if cursor!=claimed:
-            return "the carried head_receipt_sha is not a member of the organization ledger chain"
+    if not isinstance(head,dict) or head.get("receipt_sha256")!=claimed:
+        return "the carried head_receipt_sha is not the current organization ledger head"
     receipt=store.get(store_module.receipt_key(claimed))
     body=dict(receipt or {}); body.pop("receipt_sha256",None)
     if not isinstance(receipt,dict) or receipt.get("receipt_sha256")!=claimed or sha(body)!=claimed:
@@ -420,10 +403,7 @@ def frame_provenance(frame:dict[str,Any])->dict[str,Any]|None:
     reference=frame.get("heartbeat_reference")
     if not isinstance(reference,dict) or not any(field in reference for field in CARRIED_PROVENANCE_FIELDS):
         return None
-    provenance={field:reference.get(field) for field in CARRIED_PROVENANCE_FIELDS}
-    # The crossing's admission record: the head ingest verified as current.
-    provenance["admission_head_receipt_sha"]=reference.get("head_receipt_sha")
-    return provenance
+    return {field:reference.get(field) for field in CARRIED_PROVENANCE_FIELDS}
 
 def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
                  hb_epoch:Any=None)->dict[str,Any]:

@@ -300,13 +300,23 @@ def verify_source(receipt):
     }
 
 
-def _validate_existing_head(store):
+def _validate_existing_head(store, pending=frozenset()):
+    """Verify the chain the next append extends.
+
+    `pending` names the content-addressed documents this append is about to
+    write. A torn earlier attempt of the same append can leave exactly those
+    documents written without the HEAD that publishes them. The rewrite is
+    byte-identical, so they are tolerated and the append publishes HEAD. Any
+    other unpublished document is this store's own torn state, not a defect of
+    what is being appended. It is LedgerWriteFailed, a writer fault, so the
+    caller can leave its input pending rather than refuse it.
+    """
     head = store.get(HEAD_KEY)
     if head is None:
         # A missing HEAD with existing receipts requires explicit recovery;
         # never silently fork or reset the organization chain.
-        if store.list_prefix(RECEIPT_PREFIX):
-            raise SystemExit("ORG_LEDGER_HEAD_MISSING_WITH_EXISTING_RECEIPTS")
+        if store.list_prefix(RECEIPT_PREFIX) - set(pending):
+            raise LedgerWriteFailed("ORG_LEDGER_HEAD_MISSING_WITH_EXISTING_RECEIPTS")
         return None
     previous = head.get("receipt_sha256")
     if not isinstance(previous, str) or not previous.startswith("sha256:"):
@@ -334,15 +344,15 @@ def _validate_existing_head(store):
         if record.get("receipt_sha256") != cursor or sha(record_body) != cursor:
             raise SystemExit("ORG_LEDGER_PREDECESSOR_HASH_MISMATCH")
         cursor = record.get("previous_receipt_sha256")
-    if store.list_prefix(RECEIPT_PREFIX) != {receipt_key(digest) for digest in reachable}:
-        raise SystemExit("ORG_LEDGER_UNPUBLISHED_OR_ORPHAN_RECEIPTS_RECOVERY_REQUIRED")
+    if store.list_prefix(RECEIPT_PREFIX) - set(pending) != {receipt_key(digest) for digest in reachable}:
+        raise LedgerWriteFailed("ORG_LEDGER_UNPUBLISHED_OR_ORPHAN_RECEIPTS_RECOVERY_REQUIRED")
     # A retained source copy is published only through the receipt that names
     # it. Ledgers written before retention existed simply have none.
     sources = {source_key(store.get(receipt_key(digest))["source_transition_sha256"])
                for digest in reachable
                if isinstance(store.get(receipt_key(digest)).get("source_transition_sha256"), str)}
-    if not store.list_prefix(SOURCE_PREFIX) <= sources:
-        raise SystemExit("ORG_LEDGER_ORPHAN_SOURCE_RECEIPTS_RECOVERY_REQUIRED")
+    if not store.list_prefix(SOURCE_PREFIX) - set(pending) <= sources:
+        raise LedgerWriteFailed("ORG_LEDGER_ORPHAN_SOURCE_RECEIPTS_RECOVERY_REQUIRED")
     return previous
 
 
@@ -381,17 +391,6 @@ def append(source_receipt, org_transition_class, predecessor_state, successor_st
         with guard:
             expected_head = target.get(HEAD_KEY)
             previous = (expected_head or {}).get("receipt_sha256")
-            _validate_existing_head(target)
-            # A source receipt is consumed once. With `idempotent` the chain is
-            # read at the HEAD this attempt compares against: a receipt already
-            # consuming this exact source is returned instead of a second one
-            # minted, and one consuming it under another class is a collision.
-            if idempotent:
-                prior = recorded(target, expected_head, source["source_transition_sha256"])
-                if prior is not None:
-                    if prior.get("org_transition_class") != org_transition_class:
-                        raise ValueError("ledger_receipt_collision")
-                    return prior
             # Resolved against the HEAD this attempt will compare against, so a
             # retry after a lost comparison re-resolves rather than reusing it.
             if predecessor_state == FROM_HEAD:
@@ -404,23 +403,37 @@ def append(source_receipt, org_transition_class, predecessor_state, successor_st
                 predecessor = None
             else:
                 predecessor = predecessor_state
-        body = {
-            "schema": "stegverse.organization-transition-receipt/v1",
-            "organization": C["organization"],
-            **source,
-            "org_transition_class": org_transition_class,
-            "predecessor_org_state_sha256": predecessor,
-            "successor_org_state_sha256": successor_state,
-            "boundary_evidence": boundary_evidence,
-            "authority_effect": authority_effect,
-            "hb_reference": heartbeat,
-            "previous_receipt_sha256": previous,
-        }
-        if predecessor_state == GENESIS:
-            body["chain_genesis"] = True
-        digest = sha(body)
-        receipt = {**body, "receipt_sha256": digest}
-        key = receipt_key(digest)
+            body = {
+                "schema": "stegverse.organization-transition-receipt/v1",
+                "organization": C["organization"],
+                **source,
+                "org_transition_class": org_transition_class,
+                "predecessor_org_state_sha256": predecessor,
+                "successor_org_state_sha256": successor_state,
+                "boundary_evidence": boundary_evidence,
+                "authority_effect": authority_effect,
+                "hb_reference": heartbeat,
+                "previous_receipt_sha256": previous,
+            }
+            if predecessor_state == GENESIS:
+                body["chain_genesis"] = True
+            digest = sha(body)
+            receipt = {**body, "receipt_sha256": digest}
+            key = receipt_key(digest)
+            # The documents this append writes may already exist, unpublished,
+            # from a torn attempt of this same append; the rewrite is
+            # byte-identical, so only they are tolerated.
+            _validate_existing_head(target, pending=frozenset({key, *retained}))
+            # A source receipt is consumed once. With `idempotent` the chain is
+            # read at the HEAD this attempt compares against: a receipt already
+            # consuming this exact source is returned instead of a second one
+            # minted, and one consuming it under another class is a collision.
+            if idempotent:
+                prior = recorded(target, expected_head, source["source_transition_sha256"])
+                if prior is not None:
+                    if prior.get("org_transition_class") != org_transition_class:
+                        raise ValueError("ledger_receipt_collision")
+                    return prior
         new_head = {
             "organization": C["organization"],
             "receipt_sha256": digest,
