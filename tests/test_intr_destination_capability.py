@@ -2928,3 +2928,293 @@ class MultiStepWriteResumableTests(CopiedRepository):
         received = runtime.ingress(envelope, "4096")
         self.assertEqual(json.loads(torn.read_text(encoding="utf-8"))["receipt_hash"], received["receipt_hash"])
         self.assertEqual(runtime.ingress(envelope, "4096"), received)
+
+
+class ResponseIdKeyingTests(CopiedRepository):
+    """Response-once keying (Lane B 09:40Z): a response is reused only for the same request, the same
+    packet id and the same digest. A different request under that response id is six-field
+    RESPONSE_ID_COLLISION, quarantined before any ledger write, and never handed the earlier response."""
+
+    def ledger_files(self):
+        return sorted(str(path) for name in self.LEDGER_ROOTS
+                      for path in Path(os.environ[name]).rglob("*") if path.is_file())
+
+    def response_frames(self):
+        return ResponsePublishedOnceTests.response_frames(self)
+
+    def cycle(self):
+        return ResponsePublishedOnceTests.cycle(self)
+
+    def run_cycle(self, cycle, epoch="4096"):
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", epoch]), 0)
+        return json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text(encoding="utf-8"))
+
+    def refused_markers(self):
+        markers = self.copy / "resident-runtime/federation/seen.d"
+        found = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(markers.glob("*.json"))]
+        return [marker for marker in found if marker.get("status") == "REFUSED"]
+
+    def assert_collision(self, refusal):
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("FRAME_REFUSED_QUARANTINED", True))
+        self.assertEqual(refusal["refused_failure_code"], "RESPONSE_ID_COLLISION")
+        for field in ("failed_predicate", "detail", "required_evidence_or_repair", "retry_entrypoint",
+                      "owning_existing_goal", "next_attempt"):
+            self.assertTrue(refusal[field], field)
+        self.assertIs(refusal["consequence_committed"], False)
+
+    def collide(self, second_packet_id, second_payload):
+        cycle = self.cycle()
+        self.publish(ADDRESS, diagnostic("probe-keying"), "probe-keying-a")
+        record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_consumed"], record["responses_emitted"]), (1, 1))
+        first = self.response_frames()
+        self.assertEqual(len(first), 1)
+        before = self.ledger_files()
+        self.publish(ADDRESS, second_payload, second_packet_id)
+        record = self.run_cycle(cycle)
+        self.assertEqual(record["responses_emitted"], 0)
+        self.assertEqual(self.response_frames(), first)
+        self.assertEqual(self.ledger_files(), before)
+        body = kernel.recover_packet(first[0])["payload"]["body"]
+        self.assertEqual(body["request_packet_id"], "probe-keying-a")
+        return cycle
+
+    def test_another_request_under_the_same_communication_id_is_a_collision(self):
+        payload = diagnostic("probe-keying")
+        payload["subject"] = "a different request"
+        cycle = self.collide("probe-keying-b", payload)
+        refused = self.refused_markers()
+        self.assertEqual([marker["packet_id"] for marker in refused], ["probe-keying-b"])
+        self.assert_collision(refused[0]["refusal"])
+        record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_seen"], record["responses_emitted"]), (0, 0))
+        self.assertEqual(len(self.response_frames()), 1)
+
+    def test_the_same_request_id_with_other_content_is_a_collision_not_the_earlier_response(self):
+        payload = diagnostic("probe-keying")
+        payload["body"] = {**payload["body"], "probe": "other-content"}
+        self.collide("probe-keying-a", payload)
+        refused = self.refused_markers()
+        self.assertEqual([marker["packet_id"] for marker in refused], ["probe-keying-a"])
+        self.assert_collision(refused[0]["refusal"])
+
+    def test_the_same_request_resent_reuses_its_response(self):
+        cycle = self.cycle()
+        self.publish(ADDRESS, diagnostic("probe-keying"), "probe-keying-a")
+        self.run_cycle(cycle)
+        first = self.response_frames()
+        self.publish(ADDRESS, diagnostic("probe-keying"), "probe-keying-a", epoch=8192)
+        record = self.run_cycle(cycle, "8192")
+        self.assertEqual((record["frames_consumed"], record["responses_emitted"]), (1, 0))
+        self.assertEqual(self.response_frames(), first)
+        self.assertEqual(self.refused_markers(), [])
+
+    def gateway(self):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "gateway_keying", self.copy / "resident-runtime/federation_gateway_transport.py"))
+        module.__spec__.loader.exec_module(module)
+        return module
+
+    def gateway_frame(self, payload, packet_id):
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=ADDRESS, payload=payload,
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+            packet_id=packet_id)
+        return kernel.carrier_frame(packet, epoch=4096)
+
+    def test_the_gateway_refuses_another_request_under_a_submitted_response_id(self):
+        gateway = self.gateway()
+        other = diagnostic("probe-gw-keying")
+        other["body"] = {**other["body"], "probe": "other-content"}
+        cases = [(self.gateway_frame(diagnostic("probe-gw-keying"), "probe-gw-a"), "CONSUMED"),
+                 (self.gateway_frame(other, "probe-gw-a"), "REFUSED"),
+                 (self.gateway_frame(diagnostic("probe-gw-keying"), "probe-gw-b"), "REFUSED")]
+        submitted, acks = [], []
+
+        def json_request(method, path, body=None, headers=None):
+            if path.endswith("/acknowledgements"):
+                acks.append(body)
+                return {"state": body["state"]}
+            submitted.append(body)
+            return {"state": "PENDING"}
+
+        before = None
+        for frame, state in cases:
+            with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
+                    mock.patch.object(gateway, "_json_request", side_effect=json_request):
+                result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+            self.assertEqual(result["state"], state)
+            if state == "REFUSED":
+                self.assert_collision(result["refusal"])
+                self.assertEqual(result["responses_emitted"], 0)
+                self.assertEqual(acks[-1]["state"], "BLOCKED")
+                self.assertEqual(self.ledger_files(), before)
+            before = self.ledger_files()
+        self.assertEqual(len(submitted), 1)
+
+
+class WriterTraceTests(CopiedRepository):
+    """F-WRITER-TRACE (Lane B 09:50Z, V-P11): every epoch-taking writer CLI prints a non-terminal
+    six-field record when its own write faults, never a raw OSError or traceback. The fault is
+    injected at each write in turn (every durable write is an os.replace), and the next run
+    completes, leaving exactly the documents a run without a fault leaves."""
+
+    def setUp(self):
+        super().setUp()
+        self.out = Path(self._work.name) / "out"
+        self.inputs = Path(self._work.name) / "inputs"
+        self.inputs.mkdir()
+        (self.inputs / "payload.json").write_text(json.dumps(diagnostic("probe-writer-trace")), encoding="utf-8")
+        (self.inputs / "standing.json").write_text(json.dumps(STANDING), encoding="utf-8")
+
+    def state_roots(self):
+        return [Path(os.environ[name]) for name in self.LEDGER_ROOTS] + [
+            self.mesh, self.out, Path(self._work.name) / "runtime",
+            self.copy / "resident-runtime/federation", self.copy / "resident-runtime/control"]
+
+    def reset(self):
+        for root in self.state_roots():
+            shutil.rmtree(root, ignore_errors=True)
+
+    def documents(self):
+        """Every document left, with a response frame named by its response id: a resumed run's
+        response truthfully says transition_replayed, but it is still the one response."""
+        found = []
+        for root in self.state_roots():
+            for path in (sorted(root.rglob("*")) if root.is_dir() else []):
+                if not path.is_file():
+                    continue
+                if path.parent.name == "frames.d":
+                    packet_id = json.loads(path.read_text(encoding="utf-8"))["packet_id"]
+                    if ":response:" in packet_id:
+                        found.append("response " + packet_id)
+                        continue
+                found.append(str(path))
+        return sorted(found)
+
+    def invoke(self, main, argv, fail_at=None):
+        """Run one CLI in this process: (exit code, printed lines, os.replace calls)."""
+        real_replace, calls = os.replace, []
+
+        def replace(*args, **kwargs):
+            calls.append(args)
+            if fail_at is not None and len(calls) == fail_at:
+                raise OSError(28, "No space left on device")
+            return real_replace(*args, **kwargs)
+
+        with mock.patch("sys.argv", argv), mock.patch("os.replace", side_effect=replace), \
+                mock.patch("builtins.print") as printed:
+            try:
+                code = main()
+            except SystemExit as exc:
+                code = exc.code
+        return code, [call.args[0] for call in printed.call_args_list], len(calls)
+
+    def assert_each_write_fault_is_six_field_and_resumable(self, load, argv, expected=0):
+        self.reset()
+        main = load()
+        code, _, writes = self.invoke(main, argv)
+        self.assertEqual(code if code is not None else 0, expected)
+        self.assertGreater(writes, 0)
+        clean = self.documents()
+        for fail_at in range(1, writes + 1):
+            with self.subTest(fail_at=fail_at):
+                self.reset()
+                main = load()
+                code, printed, _ = self.invoke(main, argv, fail_at)
+                record = json.loads(printed[-1])
+                if code == 0 and record.get("deferrals"):
+                    # A cycle that deferred a frame completes; the frame's record is six-field.
+                    self.assertEqual(len(record["deferrals"]), 1)
+                    refusal = record["deferrals"][0]
+                else:
+                    self.assertEqual(code, 1)
+                    refusal = record
+                self.assertEqual((refusal["disposition"], refusal["terminal"]), ("FAIL_CLOSED", False))
+                self.assertIn(refusal["failure_code"], ("WRITER_IO_FAILED", "CYCLE_RECORD_WRITE_FAILED",
+                                                        "FRAME_DISPATCH_IO_FAILED"))
+                for field in ("failed_predicate", "detail", "required_evidence_or_repair",
+                              "retry_entrypoint", "owning_existing_goal", "next_attempt"):
+                    self.assertTrue(refusal[field], field)
+                code, _, _ = self.invoke(main, argv)
+                self.assertEqual(code if code is not None else 0, expected)
+                self.assertEqual(self.documents(), clean)
+
+    def cli(self, name, relative):
+        def load():
+            module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+                name, self.copy / relative))
+            module.__spec__.loader.exec_module(module)
+            return module.main
+        return load
+
+    def test_the_repository_emitter(self):
+        self.assert_each_write_fault_is_six_field_and_resumable(
+            self.cli("emit_trace", ".stegverse/transition-ledger/emit.py"),
+            ["emit.py", "--transition-id", "probe-writer-trace", "--transition-class", "CLASS",
+             "--predecessor-state-sha256", "sha256:" + "a" * 64,
+             "--successor-state-sha256", "sha256:" + "b" * 64, "--hb-epoch", "4096"])
+
+    def test_the_organization_aggregate(self):
+        receipt = self.inputs / "repo-receipt.json"
+
+        def load():
+            emit = _module("emit_trace_source", ".stegverse/transition-ledger/emit.py")
+            if not receipt.exists():
+                root = os.environ["STEGVERSE_REPO_LEDGER_ROOT"]
+                os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = str(self.inputs / "source-ledger")
+                try:
+                    receipt.write_text(json.dumps(emit.append(
+                        "probe-writer-trace", "CLASS", "sha256:" + "a" * 64, "sha256:" + "b" * 64,
+                        {}, "NONE", 4096)), encoding="utf-8")
+                finally:
+                    os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = root
+            return self.cli("aggregate_trace", "resident-runtime/aggregate_repo_transition.py")()
+
+        self.assert_each_write_fault_is_six_field_and_resumable(
+            load, ["aggregate_repo_transition.py", "--transition-receipt", str(receipt),
+                   "--predecessor-org-state-sha256", "GENESIS",
+                   "--successor-org-state-sha256", "sha256:" + "c" * 64, "--hb-epoch", "4096"])
+
+    def test_the_ingress_receive_and_self_close_commands(self):
+        registry = str(self.copy / "org-boundary/registry/services.json")
+        load = self.cli("ingress_trace", "resident-runtime/intr_destination_ingress.py")
+        self.assert_each_write_fault_is_six_field_and_resumable(
+            load, ["intr_destination_ingress.py", "--registry", registry,
+                   "--payload", str(self.inputs / "payload.json"), "--hb-epoch", "4096",
+                   "--out", str(self.out / "receive.json")])
+        self.assert_each_write_fault_is_six_field_and_resumable(
+            load, ["intr_destination_ingress.py", "--registry", registry, "--self-close",
+                   "--communication-id", "probe-writer-trace", "--hb-epoch", "4096",
+                   "--out", str(self.out / "self-close.json")])
+
+    def test_the_egress_emit_command(self):
+        self.assert_each_write_fault_is_six_field_and_resumable(
+            self.cli("egress_trace", "resident-runtime/organization_egress_boundary.py"),
+            ["organization_egress_boundary.py", "--destination-organization", PEER,
+             "--payload", str(self.inputs / "payload.json"), "--standing", str(self.inputs / "standing.json"),
+             "--capability", PROFILE_ID, "--mesh-root", str(self.mesh), "--hb-epoch", "4096",
+             "--out", str(self.out / "egress.json")])
+
+    def test_the_organization_runtime_activation(self):
+        def load():
+            return self.runtime().main
+        self.assert_each_write_fault_is_six_field_and_resumable(
+            load, ["organization_runtime.py", "activate", "--activation-id", "probe-writer-trace",
+                   "--node-ref", "probe-node", "--hb-epoch", "4096"])
+
+    def test_the_ecosystem_publisher(self):
+        self.assert_each_write_fault_is_six_field_and_resumable(
+            self.cli("ecosystem_trace", "resident-runtime/ecosystem_control.py"),
+            ["ecosystem_control.py", "send-message", "--subject", "probe", "--body-json", "{}",
+             "--communication-id", "probe-writer-trace", "--hb-epoch", "4096"])
+
+    def test_the_federation_cycle(self):
+        def load():
+            if not (self.mesh / "frames.d").is_dir():
+                self.publish(ADDRESS, diagnostic("probe-writer-trace-cycle"), "probe-writer-trace-cycle")
+            return self.cli("cycle_trace", "resident-runtime/federation_cycle.py")()
+        self.assert_each_write_fault_is_six_field_and_resumable(
+            load, ["federation_cycle.py", "--hb-epoch", "4096"])

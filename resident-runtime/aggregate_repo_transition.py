@@ -475,8 +475,10 @@ def main():
     except OrgLedgerEpochRefused as exc:
         print(json.dumps(exc.refusal, sort_keys=True))
         raise SystemExit(1)
-    except LedgerWriteFailed as exc:
-        raise SystemExit(str(exc))
+    except (LedgerWriteFailed, OSError) as exc:
+        # This boundary's own write fault: non-terminal six-field, never a traceback.
+        print(json.dumps(kernel.writer_fault_refusal(exc, retry_entrypoint=EPOCH_RETRY_ENTRYPOINT), sort_keys=True))
+        raise SystemExit(1)
     print(json.dumps(result, sort_keys=True))
 
 

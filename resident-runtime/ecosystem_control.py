@@ -8,8 +8,21 @@ SPEC=importlib.util.spec_from_file_location("org_kernel",ROOT/"org-kernel"/"kern
 K=importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(K)
 GWSPEC=importlib.util.spec_from_file_location("federation_gateway_transport",ROOT/"resident-runtime"/"federation_gateway_transport.py")
 GW=importlib.util.module_from_spec(GWSPEC); GWSPEC.loader.exec_module(GW)
+RETRY_ENTRYPOINT="resident-runtime/ecosystem_control.py::main"
 
 def main():
+    try:
+        _main()
+    except Exception as exc:
+        # This boundary's own write fault is non-terminal six-field, and a
+        # six-field refusal is printed as it is: never a raw OSError or traceback.
+        refusal=K.cli_refusal(exc,retry_entrypoint=RETRY_ENTRYPOINT)
+        if refusal is None:
+            raise
+        print(json.dumps(refusal,sort_keys=True))
+        raise SystemExit(1)
+
+def _main():
     ap=argparse.ArgumentParser()
     sub=ap.add_subparsers(dest="cmd",required=True)
     for name,cls in (("send-monitor","ecosystem.monitor.request"),("send-work","ecosystem.work.request"),("send-message","ecosystem.communication")):

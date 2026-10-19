@@ -324,17 +324,18 @@ def main() -> int:
                 registry=registry,
                 packet_id=args.packet_id or "organization-intr-destination",
                 hb_epoch=hb_epoch)
-    except ValueError as exc:
+        if args.out:
+            kernel.write_json_atomic(args.out, result)
+    except Exception as exc:
         # A ledger writer's six-field refusal (for example a source receipt of
-        # clock provenance), from whichever kernel copy refused it.
-        if not isinstance(getattr(exc, "refusal", None), dict):
+        # clock provenance), from whichever kernel copy refused it; or this
+        # boundary's own write fault, as non-terminal six-field. Never a raw
+        # OSError or traceback.
+        refusal = kernel.cli_refusal(exc, retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+        if refusal is None:
             raise
-        print(json.dumps(exc.refusal, sort_keys=True))
+        print(json.dumps(refusal, sort_keys=True))
         return 1
-    rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(rendered, encoding="utf-8")
     print(json.dumps(result, sort_keys=True))
     return 0 if result.get("disposition") == ALLOW else 1
 

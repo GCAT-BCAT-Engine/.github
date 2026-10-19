@@ -14,6 +14,7 @@ kernel=importlib.util.module_from_spec(_spec); _spec.loader.exec_module(kernel)
 # A receipt references the heartbeat epoch its caller supplies, checked by the
 # kernel's shared rule before anything is written; it is never a clock reading.
 ACTIVATE_EPOCH_RETRY_ENTRYPOINT="runtime/organization_runtime.py::activate (hb_epoch=, or --hb-epoch)"
+RUNTIME_RETRY_ENTRYPOINT="runtime/organization_runtime.py::main"
 INGRESS_EPOCH_RETRY_ENTRYPOINT="runtime/organization_runtime.py::ingress (hb_epoch=, or --hb-epoch)"
 def config()->dict[str,Any]:
     v=json.loads(CONFIG.read_text())
@@ -75,7 +76,11 @@ def main()->int:
         if x.cmd=="activate": r=activate(x.activation_id,x.node_ref,x.hb_epoch)
         elif x.cmd=="egress": r=egress(x.message_id,x.operation_id,{"boundary":x.destination_boundary,"subsystem":x.destination_subsystem},x.payload.encode(),x.hb_reference)
         else:r=ingress(json.loads(x.file.read_text()),x.hb_epoch)
-    except kernel.SuppliedEpochRefused as exc:
-        print(json.dumps(exc.refusal,sort_keys=True)); return 1
+    except Exception as exc:
+        # A six-field refusal, or this boundary's own write fault as a
+        # non-terminal six-field record: never a raw OSError or traceback.
+        refusal=kernel.cli_refusal(exc,retry_entrypoint=RUNTIME_RETRY_ENTRYPOINT+" "+x.cmd)
+        if refusal is None: raise
+        print(json.dumps(refusal,sort_keys=True)); return 1
     print(json.dumps(r,sort_keys=True)); return 0
 if __name__=="__main__": raise SystemExit(main())

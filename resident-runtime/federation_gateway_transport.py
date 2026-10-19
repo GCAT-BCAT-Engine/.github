@@ -178,40 +178,75 @@ def _persist_response(repo_root: Path, packet: dict[str, Any], execution_result:
         raise FederationGatewayTransportError(str(exc)) from None
 
 
-def _submitted_response_path(repo_root: Path, request_packet_id: str) -> Path:
-    name = K.sha(request_packet_id)[7:] + ".json"
+def _submitted_response_path(repo_root: Path, response_packet_id: str) -> Path:
+    name = K.sha(response_packet_id)[7:] + ".json"
     return repo_root / "resident-runtime" / "federation" / "gateway-responses.d" / name
 
 
-def _submit_response_once(repo_root: Path, request_packet_id: str, response_frame: dict[str, Any]) -> dict[str, Any]:
-    """Submit one response per request, resumable at every step.
+def _submitted_response_record(repo_root: Path, request_packet: dict[str, Any]) -> dict[str, Any] | None:
+    """The gateway response already recorded for this request, or None.
 
-    1. The response frame is recorded, atomically and marked unsubmitted,
-       before it is submitted.
-    2. It is submitted.
-    3. The record is marked submitted.
-
-    A fault at any step leaves the request pending. The retry reuses the
-    recorded frame: it resubmits the same bytes if step 3 had not happened,
-    and submits nothing if it had. So the gateway never sees a second,
-    different response for the same request packet id.
+    The record is keyed by the response id. One that answers any other request
+    -- another packet id, or the same id with other content -- is
+    K.ResponseIdCollision: this request is never handed that response.
     """
-    path = _submitted_response_path(repo_root, request_packet_id)
+    response_id = K.control_response_packet_id(request_packet)
+    path = _submitted_response_path(repo_root, response_id)
     record = None
     if path.is_file():
         try:
             record = json.loads(path.read_bytes().decode("utf-8"))
         except ValueError:
             record = None
-    if isinstance(record, dict) and isinstance(record.get("frame"), dict):
+    if not isinstance(record, dict) or not isinstance(record.get("frame"), dict):
+        return None
+    binding = K.request_binding(request_packet)
+    recorded = {key: record.get(key) for key in binding}
+    if recorded != binding:
+        raise K.response_id_collision(response_id, recorded, binding)
+    return record
+
+
+def _gateway_response_collision(repo_root: Path, frame: Any) -> dict[str, Any] | None:
+    """The RESPONSE_ID_COLLISION of a gateway request frame, checked before ingest, or None."""
+    try:
+        packet = K.recover_packet(frame)
+        if (packet.get("payload") or {}).get("message_class") not in K.RESPONDING_MESSAGE_CLASSES:
+            return None
+        _submitted_response_record(repo_root, packet)
+    except K.ResponseIdCollision as exc:
+        return exc.refusal
+    except (ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def _submit_response_once(repo_root: Path, request_packet: dict[str, Any], response_frame: dict[str, Any]) -> dict[str, Any]:
+    """Submit one response per request, resumable at every step.
+
+    1. The response frame is recorded, atomically and marked unsubmitted,
+       under its response id and with the request's packet id and digest,
+       before it is submitted.
+    2. It is submitted.
+    3. The record is marked submitted.
+
+    A fault at any step leaves the request pending. The retry of the same
+    request reuses the recorded frame: it resubmits the same bytes if step 3
+    had not happened, and submits nothing if it had. A different request under
+    the same response id is K.ResponseIdCollision, never the recorded frame.
+    """
+    path = _submitted_response_path(repo_root, response_frame["packet_id"])
+    binding = K.request_binding(request_packet)
+    record = _submitted_response_record(repo_root, request_packet)
+    if record is not None:
         frame = record["frame"]
         if record.get("submitted") is not True:
             submit_frame(frame)
-            K.write_json_atomic(path, {"frame": frame, "submitted": True})
+            K.write_json_atomic(path, {**binding, "frame": frame, "submitted": True})
         return {"frame": frame, "reused": True}
-    K.write_json_atomic(path, {"frame": response_frame, "submitted": False})
+    K.write_json_atomic(path, {**binding, "frame": response_frame, "submitted": False})
     submit_frame(response_frame)
-    K.write_json_atomic(path, {"frame": response_frame, "submitted": True})
+    K.write_json_atomic(path, {**binding, "frame": response_frame, "submitted": True})
     return {"frame": response_frame, "reused": False}
 
 
@@ -255,7 +290,12 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
     if fetched.get("state") != "FRAME_AVAILABLE":
         raise FederationGatewayTransportError("unexpected gateway fetch state")
     frame = fetched["frame"]
-    packet, result = K.ingest_or_quarantine(repo_root, frame, hb_epoch=ack_epoch)
+    collision = _gateway_response_collision(repo_root, frame)
+    if collision is not None:
+        # Refused before ingest: acknowledged BLOCKED, never the earlier response.
+        packet, result = None, K.quarantine_result(frame if isinstance(frame, dict) else {}, collision)
+    else:
+        packet, result = K.ingest_or_quarantine(repo_root, frame, hb_epoch=ack_epoch)
     if result.get("status") == "DEFERRED":
         # This boundary's own storage failed: the frame is not acknowledged,
         # so the gateway offers it again and the next cycle consumes it once.
@@ -275,19 +315,20 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
         execution = result["execution_result"]
         message_class = (packet.get("payload") or {}).get("message_class")
         try:
-            if message_class in {"ecosystem.monitor.request", "ecosystem.work.request", "ecosystem.communication"}:
+            if message_class in K.RESPONDING_MESSAGE_CLASSES:
                 response = K.build_control_response(packet, execution)
                 submitted = _submit_response_once(
-                    repo_root, packet["packet_id"], K.carrier_frame(response, epoch=result["hb_epoch"]))
+                    repo_root, packet, K.carrier_frame(response, epoch=result["hb_epoch"]))
                 response_emitted = 0 if submitted["reused"] else 1
                 response_ref = submitted["frame"]["frame_sha256"]
             elif message_class in {"ecosystem.monitor.response", "ecosystem.work.ack", "ecosystem.communication.ack"}:
                 _persist_response(repo_root, packet, execution)
+        except K.ResponseIdCollision as exc:
+            # Raced in after the check before ingest: still never the earlier response.
+            result = K.quarantine_result(frame, exc.refusal)
         except (OSError, FederationGatewayTransportError) as exc:
             return _deferred_cycle(organization, frame, exc)
-        ack_state = "CONSUMED"
-    else:
-        ack_state = "BLOCKED"
+    ack_state = "CONSUMED" if result.get("status") == "CONSUMED" else "BLOCKED"
     try:
         ack = acknowledge_frame(organization, frame, ack_state, hb_epoch=ack_epoch,
                                 refusal=result.get("refusal"))

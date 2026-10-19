@@ -613,17 +613,19 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = _run(args)
-    except ValueError as exc:
+        if args.out:
+            kernel.write_json_atomic(args.out, result)
+    except Exception as exc:
         # An epoch, provenance or collision refusal, from whichever kernel or
         # ledger copy refused it: read by its six-field `refusal`, not its class.
-        if not isinstance(getattr(exc, "refusal", None), dict):
+        # This boundary's own write fault is non-terminal six-field. Never a
+        # raw OSError or traceback.
+        refusal = kernel.cli_refusal(exc, retry_entrypoint=CLOSE_EPOCH_RETRY_ENTRYPOINT if args.close
+                                     else EPOCH_RETRY_ENTRYPOINT)
+        if refusal is None:
             raise
-        print(json.dumps(exc.refusal, sort_keys=True))
+        print(json.dumps(refusal, sort_keys=True))
         return 1
-    rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(rendered, encoding="utf-8")
     print(json.dumps(result, sort_keys=True))
     return 0 if result.get("disposition") in {ALLOW, PENDING} else 1
 

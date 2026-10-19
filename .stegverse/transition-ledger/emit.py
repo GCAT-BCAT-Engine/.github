@@ -132,7 +132,8 @@ def main():
   print(json.dumps(chain_break_refusal(exc),sort_keys=True));raise SystemExit(1)
  except RepoLedgerEpochRefused as exc:
   print(json.dumps(exc.refusal,sort_keys=True));raise SystemExit(1)
- except ledger_store.LedgerWriteFailed as exc:
-  raise SystemExit(str(exc))
+ except (ledger_store.LedgerWriteFailed,OSError) as exc:
+  # This boundary's own write fault: non-terminal six-field, never a traceback.
+  print(json.dumps(kernel.writer_fault_refusal(exc,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT),sort_keys=True));raise SystemExit(1)
  print(json.dumps(r,sort_keys=True))
 if __name__=="__main__":main()

@@ -42,16 +42,22 @@ def main(argv:list[str]|None=None)->int:
               "frames_refused":refused,
               "frames_deferred":deferred,
               "responses_emitted":responses,
+              # Each frame this boundary's own write fault left pending, as its
+              # non-terminal six-field record: the next run consumes it once.
+              "deferrals":[x["result"]["refusal"] for x in results
+                           if (x.get("result") or {}).get("status")=="DEFERRED"],
               "authority_effect":"NONE_CARRIER_ONLY",
               "transport":"LOCAL_SPOOL_FALLBACK"
             }
-    except ValueError as exc:
+    except Exception as exc:
         # A six-field epoch refusal: the cycle's own, a frame's, or a receiving
         # operation's. It is raised by whichever kernel copy refused, so it is
-        # read by its `refusal`, not its class. No cycle record is written.
-        if not isinstance(getattr(exc,"refusal",None),dict):
+        # read by its `refusal`, not its class. A write fault outside any one
+        # frame is non-terminal six-field. No cycle record is written.
+        refusal=K.cli_refusal(exc,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+        if refusal is None:
             raise
-        print(json.dumps(exc.refusal,sort_keys=True))
+        print(json.dumps(refusal,sort_keys=True))
         return 1
     out=ROOT/"resident-runtime"/"federation"/"latest-cycle.json"
     try:

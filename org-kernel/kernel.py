@@ -478,7 +478,9 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
          "HB_EPOCH_PROVENANCE_UNMARKED","HB_EPOCH_CONFLICT","carried_frame_epoch","carried_provenance_failure",
          "carried_provenance_refusal","frame_provenance","ingest_or_quarantine","frame_failure_refusal",
-         "recorded_response","write_json_atomic","write_once_json",
+         "recorded_response","response_collision_refusal","writer_fault_refusal","cli_refusal",
+         "WRITER_IO_FAILED","WRITER_WRITE_FAILED","control_response_packet_id","request_binding",
+         "RESPONSE_ID_COLLISION","ResponseIdCollision","RESPONDING_MESSAGE_CLASSES","write_json_atomic","write_once_json",
          "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED","FRAME_DISPATCH_IO_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
          "supplied_epoch_failure","SHARED_VALIDATOR_SHA256","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
@@ -749,6 +751,7 @@ def build_control_response(request_packet:dict[str,Any], execution_result:dict[s
       "subject":"response:"+str(req_payload.get("subject") or ""),
       "body":{
         "request_packet_id":request_packet["packet_id"],
+        "request_packet_sha256":sha(request_packet),
         "responding_organization":local_org,
         "application_result":execution_result.get("application_result"),
         "receipt_terminal":(execution_result.get("reconstruction") or {}).get("terminal_receipt_id")
@@ -766,8 +769,40 @@ def build_control_response(request_packet:dict[str,Any], execution_result:dict[s
       payload=payload,
       transition_reference=str((request_packet.get("transition") or {}).get("reference") or "ecosystem.communication.v1")+".response",
       authority_effect="NONE",
-      packet_id=str(req_payload.get("communication_id"))+":response:"+organization_slug(local_org)
+      packet_id=control_response_packet_id(request_packet)
     )
+
+#: Request classes this boundary answers with one control response each.
+RESPONDING_MESSAGE_CLASSES=frozenset({"ecosystem.monitor.request","ecosystem.work.request","ecosystem.communication"})
+RESPONSE_ID_COLLISION="RESPONSE_ID_COLLISION"
+
+class ResponseIdCollision(ValueError):
+    """A response id already answers a different request; carries the six-field refusal."""
+    def __init__(self, refusal:dict[str,Any]):
+        super().__init__(refusal["detail"]); self.refusal=refusal
+
+def control_response_packet_id(request_packet:dict[str,Any])->str:
+    """The id of the one response to a request: its communication id and this organization."""
+    return (str((request_packet.get("payload") or {}).get("communication_id"))+":response:"
+            +organization_slug(request_packet["destination"]["org"]))
+
+def request_binding(request_packet:dict[str,Any])->dict[str,str]:
+    """What makes a request the same request: its packet id and its packet digest."""
+    return {"request_packet_id":request_packet["packet_id"],"request_packet_sha256":sha(request_packet)}
+
+def response_id_collision(response_packet_id:str, recorded:dict[str,Any], binding:dict[str,str])->ResponseIdCollision:
+    """The six-field refusal of a request whose response id already answers another request."""
+    return ResponseIdCollision({
+        "disposition":"FAIL_CLOSED","failure_code":RESPONSE_ID_COLLISION,"terminal":True,
+        "failed_predicate":"A_RESPONSE_ID_ANSWERS_EXACTLY_ONE_REQUEST",
+        "detail":("response "+response_packet_id+" already answers request "
+                  +str(recorded.get("request_packet_id"))+" ("+str(recorded.get("request_packet_sha256"))
+                  +"); this request is "+binding["request_packet_id"]+" ("+binding["request_packet_sha256"]+")"),
+        "required_evidence_or_repair":"the sender sends a different request under a new communication id",
+        "retry_entrypoint":CONSUME_EPOCH_RETRY_ENTRYPOINT,
+        "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+        "next_attempt":"this frame is quarantined and never handed the earlier response",
+        "consequence_committed":False})
 
 CONSUME_EPOCH_RETRY_ENTRYPOINT="org-kernel/kernel.py::consume_and_respond (hb_epoch=)"
 FRAME_REFUSED_QUARANTINED="FRAME_REFUSED_QUARANTINED"
@@ -821,6 +856,38 @@ def is_writer_fault(exc:BaseException)->bool:
     copy of the store raised it.
     """
     return isinstance(exc,OSError) or getattr(exc,"writer_fault",False) is True
+
+WRITER_IO_FAILED="WRITER_IO_FAILED"
+WRITER_WRITE_FAILED="WRITER_WRITE_FAILED"
+
+def writer_fault_refusal(exc:BaseException, *, retry_entrypoint:str)->dict[str,Any]:
+    """The six-field record a writer CLI prints when its own write faults.
+
+    Not terminal: every ledger and spool write is atomic or replayed
+    byte-identically, so running the same command again completes it once.
+    """
+    return {"disposition":"FAIL_CLOSED",
+            "failure_code":WRITER_IO_FAILED if isinstance(exc,OSError) else WRITER_WRITE_FAILED,
+            "terminal":False,
+            "failed_predicate":"THIS_BOUNDARY_RECORDS_ITS_OWN_STATE",
+            "detail":type(exc).__name__+": "+str(exc),
+            "required_evidence_or_repair":"this boundary's own storage accepts the write",
+            "retry_entrypoint":retry_entrypoint,
+            "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt":"run the same command again; a write already made is replayed, never doubled",
+            "consequence_committed":False}
+
+def cli_refusal(exc:BaseException, *, retry_entrypoint:str)->dict[str,Any]|None:
+    """What a writer CLI prints for an exception, or None to re-raise it.
+
+    This boundary's own write fault is its non-terminal writer_fault_refusal;
+    a six-field refusal raised by any loaded copy is printed as it is. A raw
+    OSError or traceback never reaches the caller for either.
+    """
+    if is_writer_fault(exc):
+        return writer_fault_refusal(exc,retry_entrypoint=retry_entrypoint)
+    refusal=getattr(exc,"refusal",None)
+    return refusal if isinstance(refusal,dict) else None
 
 def dispatch_io_deferral(frame:dict[str,Any], exc:BaseException)->dict[str,Any]:
     """A frame left pending because this boundary could not record its own state.
@@ -886,22 +953,28 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
         if item.get("load_error") is not None:
             packet,result=None,quarantine_result({},frame_failure_refusal(item["load_error"]))
         else:
-            packet,result=ingest_or_quarantine(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
+            collision=response_collision_refusal(item["frame"],mesh_root=mesh_root)
+            if collision is not None:
+                packet,result=None,quarantine_result(item["frame"],collision)
+            else:
+                packet,result=ingest_or_quarantine(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
         message_class=((packet or {}).get("payload") or {}).get("message_class")
         if result.get("status")=="DEFERRED":
             # Not the frame's fault: no marker, so it stays pending.
             out.append({"path":item["path"],"result":result,"response_publication":None,"seen_marker":None})
             continue
         response_publication=None
-        if result.get("status")=="CONSUMED" and message_class in {
-            "ecosystem.monitor.request","ecosystem.work.request","ecosystem.communication"}:
+        if result.get("status")=="CONSUMED" and message_class in RESPONDING_MESSAGE_CLASSES:
             response=build_control_response(packet,result["execution_result"])
             if result["hb_epoch"] is None:
                 result["response_refusal"]=writer_epoch_refusal(None,retry_entrypoint=CONSUME_EPOCH_RETRY_ENTRYPOINT)
             else:
                 try:
-                    response_publication=(recorded_response(response["packet_id"],packet["packet_id"],mesh_root=mesh_root)
+                    response_publication=(recorded_response(response["packet_id"],packet,mesh_root=mesh_root)
                                           or publish_packet(response,root=mesh_root,epoch=result["hb_epoch"]))
+                except ResponseIdCollision as exc:
+                    # Raced in after the check before ingest: still never the earlier response.
+                    result=quarantine_result(item["frame"],exc.refusal)
                 except OSError as exc:
                     # Publishing is this boundary's own write: no marker, so the
                     # next cycle publishes the response once.
@@ -920,18 +993,23 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
         out.append({"path":item["path"],"result":result,"response_publication":response_publication,"seen_marker":str(marker)})
     return out
 
-def recorded_response(response_packet_id:str, request_packet_id:str, *,
+def recorded_response(response_packet_id:str, request_packet:dict[str,Any], *,
                       mesh_root:Path|None=None)->dict[str,Any]|None:
-    """The response this boundary already published for a request, or None.
+    """The response this boundary already published for this request, or None.
 
-    Publication is idempotent per request packet id. A cycle that published a
-    response and then failed before its seen marker was durable offers the
-    request again. That cycle reuses the published response rather than
-    publishing a second one with other content.
+    Publication is idempotent per request: the same packet id and the same
+    packet digest. A cycle that published a response and then failed before
+    its seen marker was durable offers the request again, and reuses that
+    response rather than publishing a second one. A response under this id
+    that answers any other request -- another packet id, or the same id with
+    other content, or no recorded digest -- is ResponseIdCollision: the
+    request is never handed the earlier response.
     """
     frames=(mesh_root or federation_root()).resolve()/"frames.d"
     if not frames.is_dir():
         return None
+    binding=request_binding(request_packet)
+    reuse=None
     for path in sorted(frames.glob("*.json")):
         try:
             frame=json.loads(path.read_bytes().decode("utf-8"))
@@ -940,8 +1018,28 @@ def recorded_response(response_packet_id:str, request_packet_id:str, *,
             packet=recover_packet(frame)
         except (ValueError,KeyError,TypeError,AttributeError,OSError):
             continue
-        if ((packet.get("payload") or {}).get("body") or {}).get("request_packet_id")==request_packet_id:
-            return {"packet":packet,"frame":frame,"path":str(path),"reused":True}
+        body=(packet.get("payload") or {}).get("body") or {}
+        recorded={key:body.get(key) for key in binding}
+        if recorded!=binding:
+            raise response_id_collision(response_packet_id,recorded,binding)
+        reuse=reuse or {"packet":packet,"frame":frame,"path":str(path),"reused":True}
+    return reuse
+
+def response_collision_refusal(frame:Any, *, mesh_root:Path|None=None)->dict[str,Any]|None:
+    """The RESPONSE_ID_COLLISION of a request frame, checked before it is ingested, or None.
+
+    A frame that cannot be recovered, or that is not a request this boundary
+    answers, is left to ingest. No ledger is written for a colliding request.
+    """
+    try:
+        packet=recover_packet(frame)
+        if ((packet.get("payload") or {}).get("message_class")) not in RESPONDING_MESSAGE_CLASSES:
+            return None
+        recorded_response(control_response_packet_id(packet),packet,mesh_root=mesh_root)
+    except ResponseIdCollision as exc:
+        return exc.refusal
+    except (ValueError,KeyError,TypeError,AttributeError):
+        return None
     return None
 
 def collect_ecosystem_responses(origin_org:str, communication_id:str, *, mesh_root:Path|None=None)->dict[str,Any]:
