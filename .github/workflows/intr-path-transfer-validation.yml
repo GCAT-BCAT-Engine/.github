@@ -55,7 +55,10 @@ permissions:
 
 env:
   LEDGER_REF: refs/stegverse/organization-ledger
-  DRY_RUN_REF: refs/dry-run/organization-ledger
+  # a local scratch ref every organization's git store accepts as a dedicated ledger ref
+  # (StegVerse-Labs ledger_store.py: refs/stegverse/organization-ledger or one under
+  # refs/heads/organization-ledger/); it is never pushed.
+  DRY_RUN_REF: refs/heads/organization-ledger/intr-path-dry-run
 
 jobs:
   unit:
