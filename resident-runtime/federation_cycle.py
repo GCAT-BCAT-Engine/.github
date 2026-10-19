@@ -31,6 +31,7 @@ def main(argv:list[str]|None=None)->int:
             consumed=sum(1 for x in results if (x.get("result") or {}).get("status")=="CONSUMED")
             responses=sum(1 for x in results if x.get("response_publication"))
             refused=sum(1 for x in results if (x.get("result") or {}).get("status")=="REFUSED")
+            deferred=sum(1 for x in results if (x.get("result") or {}).get("status")=="DEFERRED")
             receipt={
               "schema_version":"stegverse.org-federation-cycle.v1",
               "organization":K.load_registry(ROOT)["organization"],
@@ -38,6 +39,7 @@ def main(argv:list[str]|None=None)->int:
               "frames_seen":len(results),
               "frames_consumed":consumed,
               "frames_refused":refused,
+              "frames_deferred":deferred,
               "responses_emitted":responses,
               "authority_effect":"NONE_CARRIER_ONLY",
               "transport":"LOCAL_SPOOL_FALLBACK"

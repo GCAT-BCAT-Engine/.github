@@ -440,7 +440,7 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
          "HB_EPOCH_PROVENANCE_UNMARKED","HB_EPOCH_CONFLICT","carried_frame_epoch","carried_provenance_failure",
          "carried_provenance_refusal","frame_provenance","ingest_or_quarantine","frame_failure_refusal",
-         "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED",
+         "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED","FRAME_DISPATCH_IO_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
          "supplied_epoch_failure","SHARED_VALIDATOR_SHA256","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
 
@@ -783,20 +783,43 @@ def frame_failure_refusal(exc:BaseException)->dict[str,Any]:
             "next_attempt":"this frame is terminal; the next frame and the next cycle proceed",
             "consequence_committed":False}
 
+FRAME_DISPATCH_IO_FAILED="FRAME_DISPATCH_IO_FAILED"
+
+def dispatch_io_deferral(frame:dict[str,Any], exc:OSError)->dict[str,Any]:
+    """A frame left pending because this boundary could not record its own state.
+
+    The frame is not at fault, so it gets no seen marker: the next cycle offers
+    it again, and the ledgers' idempotent replay consumes it exactly once.
+    """
+    return {"status":"DEFERRED","packet_id":frame.get("packet_id"),
+            "refusal":{"disposition":"FAIL_CLOSED","failure_code":FRAME_DISPATCH_IO_FAILED,
+                       "failed_predicate":"THIS_BOUNDARY_RECORDS_ITS_OWN_STATE",
+                       "detail":type(exc).__name__+": "+str(exc),
+                       "required_evidence_or_repair":"this boundary's own storage accepts the write",
+                       "retry_entrypoint":INGEST_EPOCH_RETRY_ENTRYPOINT,
+                       "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+                       "next_attempt":"the frame stays pending; the next cycle consumes it exactly once",
+                       "consequence_committed":False}}
+
 def ingest_or_quarantine(root:Path, frame:Any, *, mesh_root:Path|None=None,
                          hb_epoch:Any=None)->tuple[dict[str,Any]|None,dict[str,Any]]:
     """Ingest one frame of a cycle, or make it terminal: (packet or None, result).
 
-    Any error raised while ingesting this one frame -- a six-field refusal, a
-    broken frame or packet digest, a malformed frame, an adapter error -- is a
-    six-field refusal and a REFUSED result, so the cycle continues with the
-    next frame. No clock is read.
+    The guard is total. Any error that is the frame's own -- a six-field
+    refusal, a broken digest, a wrong-typed field, a malformed frame, an
+    adapter error -- is a six-field refusal and a REFUSED result. An OSError
+    is this boundary's own storage failing, not the frame: it is a DEFERRED
+    result with a six-field FRAME_DISPATCH_IO_FAILED and no marker, so the
+    frame stays pending. Either way the cycle continues with the next frame.
+    No clock is read.
     """
     try:
         if not isinstance(frame,dict):
             raise ValueError("carrier_frame_not_an_object")
         packet=recover_packet(frame)
         return packet,ingest_frame(root,frame,mesh_root=mesh_root,hb_epoch=hb_epoch)
+    except OSError as exc:
+        return None,dispatch_io_deferral(frame if isinstance(frame,dict) else {},exc)
     except Exception as exc:
         return None,quarantine_result(frame if isinstance(frame,dict) else {},frame_failure_refusal(exc))
 
@@ -824,6 +847,10 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
         else:
             packet,result=ingest_or_quarantine(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
         message_class=((packet or {}).get("payload") or {}).get("message_class")
+        if result.get("status")=="DEFERRED":
+            # Not the frame's fault: no marker, so it stays pending.
+            out.append({"path":item["path"],"result":result,"response_publication":None,"seen_marker":None})
+            continue
         response_publication=None
         if result.get("status")=="CONSUMED" and message_class in {
             "ecosystem.monitor.request","ecosystem.work.request","ecosystem.communication"}:

@@ -2247,3 +2247,138 @@ class ScanGuardTests(CopiedRepository):
         # A scan that is not a consuming cycle skips them without raising.
         self.assertEqual(kernel.scan_addressed_frames(THIS, root=self.mesh, seen=set())[0]["frame"]["packet_id"],
                          "probe-behind-malformed")
+
+
+class TotalGuardAndDispatchIoTests(CopiedRepository):
+    """F-TYPE and its IO addendum: the per-frame guard is total; this boundary's own IO failure defers."""
+
+    def capability_frame(self, packet_id, epoch=4096):
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=ADDRESS, payload=diagnostic(packet_id),
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+            packet_id=packet_id)
+        return kernel.carrier_frame(packet, epoch=epoch)
+
+    @staticmethod
+    def rebound(frame, **fields):
+        body = dict(frame)
+        body.pop("frame_sha256")
+        body.update(fields)
+        return {**body, "frame_sha256": kernel.sha(body)}
+
+    def cycle(self):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_total", self.copy / "resident-runtime/federation_cycle.py"))
+        module.__spec__.loader.exec_module(module)
+        return module
+
+    def run_cycle(self, cycle):
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        return json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+
+    def markers(self):
+        return {marker.get("packet_id"): marker for marker in
+                (json.loads(path.read_text(encoding="utf-8"))
+                 for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json"))}
+
+    def test_wrong_typed_fields_are_quarantined_and_the_valid_frames_are_ledgered(self):
+        bad = {}
+        for index, value in enumerate((123, None, ["x"], {"x": 1})):
+            packet_id = "probe-type-" + str(index)
+            bad[packet_id] = self.rebound(self.capability_frame(packet_id), packet_base64=value)
+        bad["probe-type-hash"] = {**self.capability_frame("probe-type-hash"), "frame_sha256": 7}
+        bad["probe-type-reference"] = self.rebound(self.capability_frame("probe-type-reference"),
+                                                   heartbeat_reference="x")
+        directory = self.mesh / "frames.d"
+        directory.mkdir(parents=True, exist_ok=True)
+        for packet_id, frame in bad.items():
+            # Written directly: a wrong-typed field need not survive publish_frame.
+            (directory / (packet_id + ".json")).write_text(json.dumps(frame), encoding="utf-8")
+        for packet_id in ("probe-type-valid-a", "probe-type-valid-b"):
+            kernel.publish_frame(self.capability_frame(packet_id), root=self.mesh)
+        cycle = self.cycle()
+        clock = mock.Mock(wraps=datetime)
+        clock.now = mock.Mock(side_effect=RuntimeError("clock unavailable"))
+        for module in (cycle.K, kernel):
+            patcher = mock.patch.object(module, "datetime", clock)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_consumed"], record["frames_refused"]), (2, len(bad)))
+        markers = self.markers()
+        for packet_id in bad:
+            self.assertEqual(markers[packet_id]["status"], "REFUSED", packet_id)
+            for field in SuppliedEpochParsingTests.SIX_FIELDS:
+                self.assertIn(field, markers[packet_id]["refusal"])
+        for index in range(4):
+            refusal = markers["probe-type-" + str(index)]["refusal"]
+            self.assertEqual(refusal["refused_failure_code"], "FRAME_INGEST_FAILED")
+            self.assertIn(refusal["failed_predicate"], {"AttributeError", "TypeError"})
+        repository = self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+        self.assertEqual(sorted(receipt["evidence"]["communication_id"] for receipt in repository),
+                         ["probe-type-valid-a", "probe-type-valid-b"])
+        self.assertFalse(clock.now.called)
+        self.assertEqual(self.run_cycle(cycle)["frames_seen"], 0)
+
+    def test_the_gateway_guard_is_total_too(self):
+        gateway = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "gateway_total", self.copy / "resident-runtime/federation_gateway_transport.py"))
+        gateway.__spec__.loader.exec_module(gateway)
+        frame = self.rebound(self.capability_frame("probe-gateway-type"), packet_base64=123)
+        sent = []
+        with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
+                mock.patch.object(gateway, "_json_request",
+                                  side_effect=lambda method, path, body=None, headers=None:
+                                  sent.append(body) or {"state": (body or {}).get("state")}):
+            result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+        self.assertEqual(result["state"], "REFUSED")
+        self.assertEqual(result["refusal"]["refused_failure_code"], "FRAME_INGEST_FAILED")
+        self.assertEqual(sent[0]["state"], "BLOCKED")
+
+    def test_an_io_failure_writing_this_boundarys_ledger_defers_the_frame_and_it_is_consumed_once(self):
+        kernel.publish_frame(self.capability_frame("probe-io"), root=self.mesh)
+        organization_root = str(Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]).resolve())
+        real_replace, failed = os.replace, []
+
+        def failing_replace(source, destination, *args, **kwargs):
+            if not failed and str(Path(destination).resolve()).startswith(organization_root):
+                failed.append(destination)
+                raise OSError(28, "No space left on device")
+            return real_replace(source, destination, *args, **kwargs)
+
+        cycle = self.cycle()
+        with mock.patch("os.replace", side_effect=failing_replace):
+            record = self.run_cycle(cycle)
+        self.assertTrue(failed)
+        self.assertEqual((record["frames_consumed"], record["frames_refused"], record["frames_deferred"]),
+                         (0, 0, 1))
+        self.assertNotIn("probe-io", self.markers())
+        self.assertEqual(self.receipts("STEGVERSE_ORG_LEDGER_ROOT",
+                                       "stegverse.organization-transition-receipt/v1"), [])
+        # The next cycle offers it again and consumes it exactly once.
+        record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_consumed"], record["frames_deferred"]), (1, 0))
+        self.assertEqual(self.markers()["probe-io"]["status"], "CONSUMED")
+        self.assertEqual(len(self.receipts("STEGVERSE_REPO_LEDGER_ROOT",
+                                           "stegverse.repo-transition-receipt/v1")), 1)
+        self.assertEqual(len(self.receipts("STEGVERSE_ORG_LEDGER_ROOT",
+                                           "stegverse.organization-transition-receipt/v1")), 1)
+        self.assertEqual(self.run_cycle(cycle)["frames_seen"], 0)
+
+    def test_the_gateway_defers_on_its_own_io_failure_without_acknowledging(self):
+        gateway = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "gateway_io", self.copy / "resident-runtime/federation_gateway_transport.py"))
+        gateway.__spec__.loader.exec_module(gateway)
+        sent = []
+        with mock.patch.object(gateway, "fetch_frame",
+                               return_value={"state": "FRAME_AVAILABLE", "frame": self.capability_frame("probe-gw-io")}), \
+                mock.patch.object(gateway, "_json_request", side_effect=lambda *a, **k: sent.append(a) or {}), \
+                mock.patch.object(gateway.K, "ingest_frame", side_effect=OSError(5, "I/O error")):
+            result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+        self.assertEqual(result["state"], "DEFERRED")
+        self.assertEqual(result["refusal"]["failure_code"], "FRAME_DISPATCH_IO_FAILED")
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, result["refusal"])
+        self.assertEqual(sent, [])

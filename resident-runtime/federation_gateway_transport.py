@@ -206,6 +206,19 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
         raise FederationGatewayTransportError("unexpected gateway fetch state")
     frame = fetched["frame"]
     packet, result = K.ingest_or_quarantine(repo_root, frame, hb_epoch=ack_epoch)
+    if result.get("status") == "DEFERRED":
+        # This boundary's own storage failed: the frame is not acknowledged,
+        # so the gateway offers it again and the next cycle consumes it once.
+        return {
+            "schema_version": "stegverse.org-federation-gateway-cycle.v1",
+            "organization": organization,
+            "state": "DEFERRED",
+            "refusal": result["refusal"],
+            "packet_id": frame.get("packet_id") if isinstance(frame, dict) else None,
+            "frames_consumed": 0,
+            "responses_emitted": 0,
+            "gateway_execution_authority": "NONE",
+        }
     response_emitted = 0
     response_ref = None
     if result.get("status") == "CONSUMED":
