@@ -205,13 +205,7 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
     if fetched.get("state") != "FRAME_AVAILABLE":
         raise FederationGatewayTransportError("unexpected gateway fetch state")
     frame = fetched["frame"]
-    packet = K.recover_packet(frame)
-    try:
-        result = K.ingest_frame(repo_root, frame, hb_epoch=ack_epoch)
-    except ValueError as exc:
-        if not isinstance(getattr(exc, "refusal", None), dict):
-            raise
-        result = K.quarantine_result(frame, exc.refusal)
+    packet, result = K.ingest_or_quarantine(repo_root, frame, hb_epoch=ack_epoch)
     response_emitted = 0
     response_ref = None
     if result.get("status") == "CONSUMED":

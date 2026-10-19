@@ -350,16 +350,36 @@ def carried_frame_epoch(frame:dict[str,Any])->int|None:
         malformed=writer_epoch_refusal(reference.get("epoch"),retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT)
         if malformed is not None:
             raise SuppliedEpochRefused(malformed)
+        reference_consistency(reference)
         return None
     epoch=reference.get("epoch") if isinstance(reference,dict) else None
     refusal=writer_epoch_refusal(epoch,retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT,
                                  reference=reference if reference is not None else {})
     if refusal is not None:
         raise SuppliedEpochRefused(refusal)
+    reference_consistency(reference)
     unverified=carried_provenance_failure(reference)
     if unverified is not None:
         raise SuppliedEpochRefused(carried_provenance_refusal(unverified,INGEST_EPOCH_RETRY_ENTRYPOINT))
     return int(str(epoch))
+
+HB_REFERENCE_INVALID="HB_REFERENCE_INVALID"
+HB_REFERENCE_PREDICATE="HEARTBEAT_REFERENCE_NAMES_ONE_EPOCH"
+
+def reference_consistency(reference:dict[str,Any])->None:
+    """Refuse a reference whose generation or heartbeat_id names another epoch than its own."""
+    epoch=int(str(reference["epoch"]))
+    for field,expected in (("generation",epoch),("heartbeat_id","HB:"+str(epoch))):
+        if field in reference and reference[field]!=expected:
+            raise SuppliedEpochRefused({
+                "disposition":"FAIL_CLOSED","failure_code":HB_REFERENCE_INVALID,
+                "failed_predicate":HB_REFERENCE_PREDICATE,
+                "detail":"the reference's "+field+" "+repr(reference[field])+" is not epoch "+str(epoch)+"'s",
+                "required_evidence_or_repair":"a heartbeat reference whose generation and heartbeat_id name its epoch",
+                "retry_entrypoint":INGEST_EPOCH_RETRY_ENTRYPOINT,
+                "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+                "next_attempt":"re-emit the frame with a consistent reference; nothing was written",
+                "derived_from_clock":False,"consequence_committed":False})
 
 def frame_provenance(frame:dict[str,Any])->dict[str,Any]|None:
     """The CARRIED claim a frame makes (`source`, `head_receipt_sha`), or None.
@@ -411,7 +431,8 @@ def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
 __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispatch","persist_outbox","ingest_frame",
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
          "HB_EPOCH_PROVENANCE_UNMARKED","HB_EPOCH_CONFLICT","carried_frame_epoch","carried_provenance_failure",
-         "carried_provenance_refusal","frame_provenance",
+         "carried_provenance_refusal","frame_provenance","ingest_or_quarantine","frame_failure_refusal",
+         "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
          "supplied_epoch_failure","SHARED_VALIDATOR_SHA256","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
 
@@ -451,8 +472,13 @@ def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str
     for path in sorted(frames.glob("*.json")):
         if path.name in consumed:
             continue
-        frame=json.loads(path.read_text())
-        if frame.get("destination_org")==organization:
+        try:
+            frame=json.loads(path.read_text())
+        except ValueError:
+            # Unreadable: offered once, so the consuming cycle makes it terminal.
+            out.append({"path":str(path),"frame":None})
+            continue
+        if isinstance(frame,dict) and frame.get("destination_org")==organization:
             out.append({"path":str(path),"frame":frame})
     return out
 
@@ -718,6 +744,43 @@ def quarantine_result(frame:dict[str,Any], refusal:dict[str,Any])->dict[str,Any]
                        "next_attempt":"this frame is never re-processed; the next frame and the next cycle proceed",
                        "consequence_committed":False}}
 
+FRAME_INTEGRITY_INVALID="FRAME_INTEGRITY_INVALID"
+FRAME_INGEST_FAILED="FRAME_INGEST_FAILED"
+FRAME_INTEGRITY_ERRORS={"carrier_frame_hash_mismatch","packet_hash_mismatch","packet_id_mismatch",
+                        "destination_org_mismatch","carrier_frame_not_an_object"}
+
+def frame_failure_refusal(exc:BaseException)->dict[str,Any]:
+    """The six-field refusal of one frame's ingest failure, whatever raised it."""
+    refusal=getattr(exc,"refusal",None)
+    if isinstance(refusal,dict):
+        return refusal
+    if isinstance(exc,ValueError) and str(exc) in FRAME_INTEGRITY_ERRORS:
+        code,predicate=FRAME_INTEGRITY_INVALID,"CARRIER_FRAME_BINDS_ITS_PACKET"
+    else:
+        code,predicate=FRAME_INGEST_FAILED,type(exc).__name__
+    return {"disposition":"FAIL_CLOSED","failure_code":code,"failed_predicate":predicate,
+            "detail":str(exc),"required_evidence_or_repair":"the sender re-emits the packet in a well-formed frame",
+            "retry_entrypoint":INGEST_EPOCH_RETRY_ENTRYPOINT,"owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt":"this frame is terminal; the next frame and the next cycle proceed",
+            "consequence_committed":False}
+
+def ingest_or_quarantine(root:Path, frame:Any, *, mesh_root:Path|None=None,
+                         hb_epoch:Any=None)->tuple[dict[str,Any]|None,dict[str,Any]]:
+    """Ingest one frame of a cycle, or make it terminal: (packet or None, result).
+
+    Any error raised while ingesting this one frame -- a six-field refusal, a
+    broken frame or packet digest, a malformed frame, an adapter error -- is a
+    six-field refusal and a REFUSED result, so the cycle continues with the
+    next frame. No clock is read.
+    """
+    try:
+        if not isinstance(frame,dict):
+            raise ValueError("carrier_frame_not_an_object")
+        packet=recover_packet(frame)
+        return packet,ingest_frame(root,frame,mesh_root=mesh_root,hb_epoch=hb_epoch)
+    except Exception as exc:
+        return None,quarantine_result(frame if isinstance(frame,dict) else {},frame_failure_refusal(exc))
+
 def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[str]|None=None,
                         hb_epoch:Any=None)->list[dict[str,Any]]:
     """Consume addressed frames and publish each response.
@@ -736,17 +799,9 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
     effective_seen=set(seen or set())|durable_seen
     out=[]
     for item in scan_addressed_frames(organization,root=mesh_root,seen=effective_seen):
-        packet=recover_packet(item["frame"])
-        payload=packet.get("payload") or {}
-        message_class=payload.get("message_class")
-        try:
-            result=ingest_frame(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
-        except ValueError as exc:
-            # A six-field refusal, from whichever kernel copy refused: the
-            # frame's epoch, or the receiving operation's. Nothing was written.
-            if not isinstance(getattr(exc,"refusal",None),dict):
-                raise
-            result=quarantine_result(item["frame"],exc.refusal)
+        # One frame's failure, of any kind, is that frame's terminal refusal.
+        packet,result=ingest_or_quarantine(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
+        message_class=((packet or {}).get("payload") or {}).get("message_class")
         response_publication=None
         if result.get("status")=="CONSUMED" and message_class in {
             "ecosystem.monitor.request","ecosystem.work.request","ecosystem.communication"}:
@@ -755,7 +810,8 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
                 result["response_refusal"]=writer_epoch_refusal(None,retry_entrypoint=CONSUME_EPOCH_RETRY_ENTRYPOINT)
             else:
                 response_publication=publish_packet(response,root=mesh_root,epoch=result["hb_epoch"])
-        marker=mark_federation_frame_seen(repo_root,item["path"],item["frame"],result)
+        marker=mark_federation_frame_seen(repo_root,item["path"],
+                                          item["frame"] if isinstance(item["frame"],dict) else {},result)
         out.append({"path":item["path"],"result":result,"response_publication":response_publication,"seen_marker":str(marker)})
     return out
 

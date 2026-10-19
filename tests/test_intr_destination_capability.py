@@ -1880,3 +1880,98 @@ class MalformedClockFrameTests(CopiedRepository):
             self.assertEqual(marker["status"], "REFUSED")
             self.assertEqual(marker["refusal"]["failure_code"], "FRAME_REFUSED_QUARANTINED")
             self.assertEqual(marker["refusal"]["refused_failure_code"], failure_code)
+
+
+class AnyFrameFailureIsTerminalTests(CopiedRepository):
+    """B-P36o: any error ingesting one frame of a cycle is that frame's terminal refusal."""
+
+    def packet(self, service, payload, packet_id):
+        return kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=service, payload=payload,
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+            packet_id=packet_id)
+
+    def diagnostic_frame(self, packet_id):
+        service = next(row["service_id"] for row in REGISTRY["services"]
+                       if row["boundary_role"] == "BOUNDARY_LOCAL_DIAGNOSTIC")
+        return kernel.carrier_frame(self.packet(service, {"probe": packet_id}, packet_id), epoch=4096)
+
+    @staticmethod
+    def rebound(frame, **fields):
+        body = dict(frame)
+        body.pop("frame_sha256")
+        body.update(fields)
+        return {**body, "frame_sha256": kernel.sha(body)}
+
+    def bad_frames(self):
+        generation = self.diagnostic_frame("probe-bad-generation")
+        heartbeat = self.diagnostic_frame("probe-bad-heartbeat-id")
+        frame_hash = self.diagnostic_frame("probe-bad-frame-hash")
+        packet_hash = self.diagnostic_frame("probe-bad-packet-hash")
+        epoch_value = self.diagnostic_frame("probe-bad-epoch-value")
+        unknown = kernel.carrier_frame(self.packet("gcat-bcat-engine.no-such-service", {"probe": 1},
+                                                   "probe-bad-adapter"), epoch=4096)
+        return {
+            "probe-bad-generation": (self.rebound(generation, heartbeat_reference={
+                **generation["heartbeat_reference"], "generation": 4097}), "HB_REFERENCE_INVALID"),
+            "probe-bad-heartbeat-id": (self.rebound(heartbeat, heartbeat_reference={
+                **heartbeat["heartbeat_reference"], "heartbeat_id": "HB:4097"}), "HB_REFERENCE_INVALID"),
+            "probe-bad-frame-hash": ({**frame_hash, "frame_sha256": "sha256:" + "0" * 64},
+                                     "FRAME_INTEGRITY_INVALID"),
+            "probe-bad-packet-hash": (self.rebound(packet_hash, packet_sha256="sha256:" + "0" * 64),
+                                      "FRAME_INTEGRITY_INVALID"),
+            "probe-bad-epoch-value": (self.rebound(epoch_value, heartbeat_reference={
+                **epoch_value["heartbeat_reference"], "epoch": "abc"}), "HB_EPOCH_INVALID"),
+            "probe-bad-adapter": (unknown, "FRAME_INGEST_FAILED"),
+        }
+
+    def test_a_reference_naming_another_epoch_is_refused_at_ingest(self):
+        frame = self.diagnostic_frame("probe-direct-generation")
+        with self.assertRaises(kernel.SuppliedEpochRefused) as refused:
+            kernel.ingest_frame(self.copy, self.rebound(frame, heartbeat_reference={
+                **frame["heartbeat_reference"], "generation": 4097}), mesh_root=self.mesh)
+        self.assertEqual(refused.exception.refusal["failure_code"], "HB_REFERENCE_INVALID")
+
+    def test_a_mixed_batch_quarantines_each_bad_frame_and_ledgers_the_valid_one(self):
+        bad = self.bad_frames()
+        for frame, _code in bad.values():
+            kernel.publish_frame(frame, root=self.mesh)
+        (self.mesh / "frames.d" / "unreadable.json").write_text("{not json", encoding="utf-8")
+        self.publish(ADDRESS, diagnostic("probe-batch-valid-capability"), "probe-batch-valid-capability")
+        cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_b36o", self.copy / "resident-runtime/federation_cycle.py"))
+        cycle.__spec__.loader.exec_module(cycle)
+        clock = mock.Mock(wraps=datetime)
+        clock.now = mock.Mock(side_effect=RuntimeError("clock unavailable"))
+        for module in (cycle.K, kernel):
+            patcher = mock.patch.object(module, "datetime", clock)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        latest = self.copy / "resident-runtime/federation/latest-cycle.json"
+        record = json.loads(latest.read_text(encoding="utf-8"))
+        self.assertEqual((record["frames_seen"], record["frames_consumed"], record["frames_refused"]),
+                         (len(bad) + 2, 1, len(bad) + 1))
+        markers = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json")]
+        refused = {marker.get("packet_id"): marker for marker in markers if marker["status"] == "REFUSED"}
+        for packet_id, (_frame, code) in bad.items():
+            self.assertEqual(refused[packet_id]["refusal"]["failure_code"], "FRAME_REFUSED_QUARANTINED")
+            self.assertEqual(refused[packet_id]["refusal"]["refused_failure_code"], code, packet_id)
+            for field in SuppliedEpochParsingTests.SIX_FIELDS:
+                self.assertIn(field, refused[packet_id]["refusal"])
+        self.assertEqual(refused[None]["refusal"]["refused_failure_code"], "FRAME_INTEGRITY_INVALID")
+        self.assertEqual(refused["probe-bad-adapter"]["refusal"]["failed_predicate"], "ValueError")
+        # Only the valid frame reached the ledgers.
+        repository = self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+        self.assertEqual([receipt["evidence"]["communication_id"] for receipt in repository],
+                         ["probe-batch-valid-capability"])
+        self.assertEqual(len(self.receipts("STEGVERSE_ORG_LEDGER_ROOT",
+                                           "stegverse.organization-transition-receipt/v1")), 1)
+        self.assertFalse(clock.now.called)
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        record = json.loads(latest.read_text(encoding="utf-8"))
+        self.assertEqual(record["frames_seen"], 0)
