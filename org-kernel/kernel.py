@@ -464,6 +464,7 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
          "HB_EPOCH_PROVENANCE_UNMARKED","HB_EPOCH_CONFLICT","carried_frame_epoch","carried_provenance_failure",
          "carried_provenance_refusal","frame_provenance","ingest_or_quarantine","frame_failure_refusal",
+         "recorded_response",
          "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED","FRAME_DISPATCH_IO_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
          "supplied_epoch_failure","SHARED_VALIDATOR_SHA256","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
@@ -896,11 +897,43 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
             if result["hb_epoch"] is None:
                 result["response_refusal"]=writer_epoch_refusal(None,retry_entrypoint=CONSUME_EPOCH_RETRY_ENTRYPOINT)
             else:
-                response_publication=publish_packet(response,root=mesh_root,epoch=result["hb_epoch"])
-        marker=mark_federation_frame_seen(repo_root,item["path"],
-                                          item["frame"] if isinstance(item["frame"],dict) else {},result)
+                response_publication=(recorded_response(response["packet_id"],packet["packet_id"],mesh_root=mesh_root)
+                                      or publish_packet(response,root=mesh_root,epoch=result["hb_epoch"]))
+        try:
+            marker=mark_federation_frame_seen(repo_root,item["path"],
+                                              item["frame"] if isinstance(item["frame"],dict) else {},result)
+        except OSError as exc:
+            # The marker is this boundary's own state: the frame stays pending,
+            # and the next cycle reuses the response already published.
+            out.append({"path":item["path"],"result":dispatch_io_deferral(item["frame"],exc),
+                        "response_publication":response_publication,"seen_marker":None})
+            continue
         out.append({"path":item["path"],"result":result,"response_publication":response_publication,"seen_marker":str(marker)})
     return out
+
+def recorded_response(response_packet_id:str, request_packet_id:str, *,
+                      mesh_root:Path|None=None)->dict[str,Any]|None:
+    """The response this boundary already published for a request, or None.
+
+    Publication is idempotent per request packet id. A cycle that published a
+    response and then failed before its seen marker was durable offers the
+    request again. That cycle reuses the published response rather than
+    publishing a second one with other content.
+    """
+    frames=(mesh_root or federation_root()).resolve()/"frames.d"
+    if not frames.is_dir():
+        return None
+    for path in sorted(frames.glob("*.json")):
+        try:
+            frame=json.loads(path.read_bytes().decode("utf-8"))
+            if not isinstance(frame,dict) or frame.get("packet_id")!=response_packet_id:
+                continue
+            packet=recover_packet(frame)
+        except (ValueError,KeyError,TypeError,AttributeError,OSError):
+            continue
+        if ((packet.get("payload") or {}).get("body") or {}).get("request_packet_id")==request_packet_id:
+            return {"packet":packet,"frame":frame,"path":str(path),"reused":True}
+    return None
 
 def collect_ecosystem_responses(origin_org:str, communication_id:str, *, mesh_root:Path|None=None)->dict[str,Any]:
     responses=[]

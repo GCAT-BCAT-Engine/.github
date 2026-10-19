@@ -2583,3 +2583,83 @@ class ReceiptCollisionTests(RedirectedLedgers):
             self.assertIn(field, collided)
         self.assertIs(collided["consequence_committed"], False)
         self.assertEqual(self.ledger_files(), before)
+
+
+class ResponsePublishedOnceTests(CopiedRepository):
+    """F-REPUB: a fault after a response is published leaves the frame pending; it never gets a second response."""
+
+    def response_frames(self):
+        frames = []
+        for path in sorted((self.mesh / "frames.d").glob("*.json")):
+            frame = json.loads(path.read_text(encoding="utf-8"))
+            if ":response:" in frame["packet_id"]:
+                frames.append(frame)
+        return frames
+
+    def cycle(self):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_repub", self.copy / "resident-runtime/federation_cycle.py"))
+        module.__spec__.loader.exec_module(module)
+        return module
+
+    def test_a_marker_failure_after_the_response_gives_exactly_one_response(self):
+        self.publish(ADDRESS, diagnostic("probe-repub-marker"), "probe-repub-marker")
+        cycle = self.cycle()
+        real_mark, failed = cycle.K.mark_federation_frame_seen, []
+
+        def failing_mark(*args, **kwargs):
+            if not failed:
+                failed.append(True)
+                raise OSError(28, "No space left on device")
+            return real_mark(*args, **kwargs)
+
+        with mock.patch.object(cycle.K, "mark_federation_frame_seen", side_effect=failing_mark), \
+                mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        latest = self.copy / "resident-runtime/federation/latest-cycle.json"
+        record = json.loads(latest.read_text(encoding="utf-8"))
+        self.assertEqual((record["frames_deferred"], record["responses_emitted"]), (1, 1))
+        self.assertEqual(len(self.response_frames()), 1)
+        first = self.response_frames()[0]
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        record = json.loads(latest.read_text(encoding="utf-8"))
+        self.assertEqual((record["frames_consumed"], record["responses_emitted"]), (1, 0))
+        self.assertEqual(self.response_frames(), [first])
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        self.assertEqual(json.loads(latest.read_text(encoding="utf-8"))["frames_seen"], 0)
+        self.assertEqual(len(self.response_frames()), 1)
+
+    def test_an_ack_failure_after_the_gateway_response_gives_exactly_one_response(self):
+        gateway = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "gateway_repub", self.copy / "resident-runtime/federation_gateway_transport.py"))
+        gateway.__spec__.loader.exec_module(gateway)
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=ADDRESS, payload=diagnostic("probe-repub-ack"),
+            transition_reference="intr:transition:probe-repub-ack", authority_effect="NONE",
+            packet_id="probe-repub-ack")
+        frame = kernel.carrier_frame(packet, epoch=4096)
+        submitted, acks = [], []
+
+        def json_request(method, path, body=None, headers=None):
+            if path.endswith("/acknowledgements"):
+                acks.append(body)
+                if len(acks) == 1:
+                    raise OSError(104, "Connection reset by peer")
+                return {"state": body["state"]}
+            submitted.append(body)
+            return {"state": "PENDING"}
+
+        with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
+                mock.patch.object(gateway, "_json_request", side_effect=json_request):
+            first = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+            self.assertEqual(first["state"], "DEFERRED")
+            self.assertEqual((first["refusal"]["failure_code"], first["refusal"]["terminal"]),
+                             ("FRAME_DISPATCH_IO_FAILED", False))
+            second = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+        self.assertEqual((second["state"], second["responses_emitted"]), ("CONSUMED", 0))
+        self.assertEqual(len(submitted), 1)
+        self.assertEqual(len(acks), 2)
+        self.assertEqual(second["response_frame_sha256"], submitted[0]["frame_sha256"])

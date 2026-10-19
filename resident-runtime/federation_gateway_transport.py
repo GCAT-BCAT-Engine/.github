@@ -181,6 +181,27 @@ def _persist_response(repo_root: Path, packet: dict[str, Any], execution_result:
     return path
 
 
+def _submitted_response_path(repo_root: Path, request_packet_id: str) -> Path:
+    name = K.sha(request_packet_id)[7:] + ".json"
+    return repo_root / "resident-runtime" / "federation" / "gateway-responses.d" / name
+
+
+def _submit_response_once(repo_root: Path, request_packet_id: str, response_frame: dict[str, Any]) -> dict[str, Any]:
+    """Submit a request's response once. A retried request reuses the recorded submission.
+
+    The record is written after the gateway accepts the frame. So an
+    acknowledgement that fails afterwards leaves the request pending without a
+    second response for the same request packet id.
+    """
+    path = _submitted_response_path(repo_root, request_packet_id)
+    if path.is_file():
+        return {"frame": json.loads(path.read_text(encoding="utf-8")), "reused": True}
+    submit_frame(response_frame)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(response_frame, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return {"frame": response_frame, "reused": False}
+
+
 def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> dict[str, Any]:
     """Consume one gateway frame, submit its response, and acknowledge it.
 
@@ -226,17 +247,32 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
         message_class = (packet.get("payload") or {}).get("message_class")
         if message_class in {"ecosystem.monitor.request", "ecosystem.work.request", "ecosystem.communication"}:
             response = K.build_control_response(packet, execution)
-            response_frame = K.carrier_frame(response, epoch=result["hb_epoch"])
-            submit_frame(response_frame)
-            response_emitted = 1
-            response_ref = response_frame["frame_sha256"]
+            submitted = _submit_response_once(
+                repo_root, packet["packet_id"], K.carrier_frame(response, epoch=result["hb_epoch"]))
+            response_emitted = 0 if submitted["reused"] else 1
+            response_ref = submitted["frame"]["frame_sha256"]
         elif message_class in {"ecosystem.monitor.response", "ecosystem.work.ack", "ecosystem.communication.ack"}:
             _persist_response(repo_root, packet, execution)
         ack_state = "CONSUMED"
     else:
         ack_state = "BLOCKED"
-    ack = acknowledge_frame(organization, frame, ack_state, hb_epoch=ack_epoch,
-                            refusal=result.get("refusal"))
+    try:
+        ack = acknowledge_frame(organization, frame, ack_state, hb_epoch=ack_epoch,
+                                refusal=result.get("refusal"))
+    except (OSError, FederationGatewayTransportError) as exc:
+        # The ack is this boundary's own write: the frame stays pending, and the
+        # retried request reuses the response it already submitted.
+        return {
+            "schema_version": "stegverse.org-federation-gateway-cycle.v1",
+            "organization": organization,
+            "state": "DEFERRED",
+            "refusal": K.dispatch_io_deferral(frame, exc if isinstance(exc, OSError) else OSError(str(exc)))["refusal"],
+            "packet_id": frame["packet_id"],
+            "frames_consumed": 0,
+            "responses_emitted": response_emitted,
+            "response_frame_sha256": response_ref,
+            "gateway_execution_authority": "NONE",
+        }
     return {
         "schema_version": "stegverse.org-federation-gateway-cycle.v1",
         "organization": organization,

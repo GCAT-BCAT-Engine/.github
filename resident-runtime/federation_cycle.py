@@ -29,7 +29,8 @@ def main(argv:list[str]|None=None)->int:
         else:
             results=K.consume_and_respond(ROOT,hb_epoch=heartbeat["epoch"])
             consumed=sum(1 for x in results if (x.get("result") or {}).get("status")=="CONSUMED")
-            responses=sum(1 for x in results if x.get("response_publication"))
+            responses=sum(1 for x in results
+                          if x.get("response_publication") and not x["response_publication"].get("reused"))
             refused=sum(1 for x in results if (x.get("result") or {}).get("status")=="REFUSED")
             deferred=sum(1 for x in results if (x.get("result") or {}).get("status")=="DEFERRED")
             receipt={
