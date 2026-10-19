@@ -824,13 +824,13 @@ class CopiedRepository(RedirectedLedgers):
         root = Path(self._work.name) / "runtime" / directory
         return sorted(root.glob("*.json")) if root.is_dir() else []
 
-    def publish(self, service, payload, packet_id):
+    def publish(self, service, payload, packet_id, epoch=4096):
         packet = kernel.build_packet(
             origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
             destination_org=THIS, destination_service=service, payload=payload,
             transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
             packet_id=packet_id)
-        kernel.publish_packet(packet, root=self.mesh, epoch=4096)
+        kernel.publish_packet(packet, root=self.mesh, epoch=epoch)
 
 
 class ClockMarkerAndRuntimeEpochTests(CopiedRepository):
@@ -1031,7 +1031,6 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
         supplied = kernel.carrier_frame(packet, epoch=4096)
         cases = (
             (kernel.carrier_frame(packet, now_ns=self.CLOCK_NS), "HB_EPOCH_INVALID"),
-            (_forged_frame(supplied, derived_from_clock=True), "HB_EPOCH_INVALID"),
             (_forged_frame(supplied, sampled_unix_ns=self.CLOCK_NS), "HB_EPOCH_INVALID"),
             (_forged_frame({**supplied, "heartbeat_reference": {
                 key: value for key, value in supplied["heartbeat_reference"].items()
@@ -1042,6 +1041,11 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
                 kernel.ingest_frame(ROOT, frame, mesh_root=self.mesh)
             self.assertEqual(refused.exception.refusal["failure_code"], failure_code)
         self.assertEqual(kernel.ingest_frame(ROOT, supplied, mesh_root=self.mesh)["carried_hb_epoch"], 4096)
+        # NARROW S1: a clock-flagged frame is consumed and lends no epoch.
+        flagged = kernel.ingest_frame(ROOT, _forged_frame(supplied, derived_from_clock=True),
+                                      mesh_root=self.mesh)
+        self.assertEqual((flagged["status"], flagged["carried_hb_epoch"], flagged["hb_epoch"]),
+                         ("CONSUMED", None, None))
 
     def test_a_response_and_the_monitor_status_carry_the_request_frames_epoch(self):
         self.unavailable_clock(kernel)
@@ -1093,16 +1097,15 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
         clock = self.unavailable_clock(cycle, cycle.K, cycle.GW)
         self.monitor_request("BOUNDARY_LOCAL_CONTROL", "probe-cycle-monitor")
         with mock.patch("builtins.print"):
-            self.assertEqual(cycle.main(["--hb-epoch", "5000"]), 0)
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
         self.assertFalse(clock.now.called)
         record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
-        self.assertEqual(record["heartbeat_reference"]["epoch"], 5000)
+        self.assertEqual(record["heartbeat_reference"]["epoch"], 4096)
         self.assertIs(record["heartbeat_reference"]["derived_from_clock"], False)
         self.assertEqual(record["responses_emitted"], 1)
         (frame, packet), = self.responses()
-        self.assertEqual(frame["heartbeat_reference"]["epoch"], 5000)
+        self.assertEqual(frame["heartbeat_reference"]["epoch"], 4096)
         status = packet["payload"]["body"]["application_result"]["monitor_status"]
-        # The status reports the epoch its request frame carried.
         self.assertEqual(status["heartbeat_reference"]["epoch"], 4096)
 
     def test_an_emission_replayed_at_another_epoch_publishes_and_writes_nothing(self):
@@ -1161,9 +1164,10 @@ class MarkerVocabularyTests(CopiedRepository):
             "federation_cycle_vocabulary", self.copy / "resident-runtime/federation_cycle.py"))
         cycle.__spec__.loader.exec_module(cycle)
         for module in (kernel, cycle.K, cycle.GW):
-            patcher = mock.patch.object(module, "datetime", clock)
-            patcher.start()
-            self.addCleanup(patcher.stop)
+            if hasattr(module, "datetime"):
+                patcher = mock.patch.object(module, "datetime", clock)
+                patcher.start()
+                self.addCleanup(patcher.stop)
         packet = kernel.build_packet(
             origin_org=THIS, origin_service=kernel.organization_slug(THIS) + ".org-control",
             destination_org=PEER, destination_service=kernel.organization_slug(PEER) + ".org-control",
@@ -1276,7 +1280,7 @@ class FrameEpochReachesTheOperationTests(CopiedRepository):
         for field in SuppliedEpochParsingTests.SIX_FIELDS:
             self.assertIn(field, refusal)
 
-        self.publish(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "next"}, "probe-batch-next")
+        self.publish(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "next"}, "probe-batch-next", epoch=4097)
         with mock.patch("builtins.print"):
             self.assertEqual(cycle.main(["--hb-epoch", "4097"]), 0)
         record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
@@ -1470,3 +1474,180 @@ class SharedValidatorPinTests(unittest.TestCase):
         self.assertEqual(rule(4096, {"derived_from_clock": False, "sampled_unix_ns": 1})[0],
                          "HB_EPOCH_INVALID")
         self.assertIsNone(rule(4096, {"derived_from_clock": False, "source": "X"}))
+
+
+class NarrowClockFlagAndEpochConflictTests(CopiedRepository):
+    """NARROW S1 (07:48Z), B-P36l (07:52Z) and G8 on GCAT#15.
+
+    A clock-flagged frame is consumed and lends no epoch; a route that needs
+    one refuses NOT_SUPPLIED. A supplied epoch that differs from the frame's is
+    HB_EPOCH_CONFLICT and nothing is written. The gateway acknowledgement is
+    stamped from the cycle epoch, never the clock.
+    """
+
+    def frame(self, service, payload, packet_id, *, epoch=4096, **reference):
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=service, payload=payload,
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+            packet_id=packet_id)
+        frame = kernel.carrier_frame(packet, epoch=epoch)
+        return _forged_frame(frame, **reference) if reference else frame
+
+    def services(self):
+        return {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
+
+    def snapshot(self):
+        files = set()
+        for root in (self.copy, *(Path(os.environ[name]) for name in self.LEDGER_ROOTS)):
+            if root.exists():
+                files.update(str(path) for path in root.rglob("*")
+                             if path.is_file() and "__pycache__" not in path.parts)
+        return files
+
+    def unavailable_clock(self, *modules):
+        clock = mock.Mock(wraps=datetime)
+        clock.now = mock.Mock(side_effect=RuntimeError("clock unavailable"))
+        for module in modules:
+            if getattr(module, "datetime", None) is datetime:
+                patcher = mock.patch.object(module, "datetime", clock)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+        return clock
+
+    def test_a_clock_flagged_frame_is_consumed_and_its_epoch_needing_routes_refuse(self):
+        clock = self.unavailable_clock(*_kernel_instances(ingress, capability, kernel))
+        services = self.services()
+        diagnostic_frame = self.frame(services["BOUNDARY_LOCAL_DIAGNOSTIC"],
+                                      {"communication_id": "probe-flagged-communication",
+                                       "message_class": "ecosystem.communication",
+                                       "subject": "probe", "body": {}},
+                                      "probe-flagged-communication", derived_from_clock=True)
+        consumed = kernel.ingest_frame(self.copy, diagnostic_frame, mesh_root=self.mesh)
+        self.assertEqual((consumed["status"], consumed["hb_epoch"]), ("CONSUMED", None))
+        for service, payload, packet_id in (
+                (services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-flagged-monitor",
+                                                      "message_class": "ecosystem.monitor.request",
+                                                      "subject": "probe", "body": {}},
+                 "probe-flagged-monitor"),
+                (ADDRESS, diagnostic("probe-flagged-capability"), "probe-flagged-capability")):
+            with self.assertRaises(ValueError) as refused:
+                kernel.ingest_frame(self.copy, self.frame(service, payload, packet_id,
+                                                          derived_from_clock=True),
+                                    mesh_root=self.mesh)
+            self.assertEqual(refused.exception.refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        self.assertEqual(self.receipts("STEGVERSE_REPO_LEDGER_ROOT",
+                                       "stegverse.repo-transition-receipt/v1"), [])
+        # Its response needs an epoch: with none supplied it is refused, never clock-stamped.
+        kernel.publish_frame(diagnostic_frame, root=self.mesh)
+        results = kernel.consume_and_respond(self.copy, mesh_root=self.mesh)
+        (item,) = results
+        self.assertEqual(item["result"]["status"], "CONSUMED")
+        self.assertIsNone(item["response_publication"])
+        self.assertEqual(item["result"]["response_refusal"]["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        marker = json.loads(Path(item["seen_marker"]).read_text(encoding="utf-8"))
+        self.assertEqual(marker["response_refusal"]["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        self.assertEqual(clock.now.call_count, 0)
+
+    def test_a_supplied_epoch_answers_a_clock_flagged_frame(self):
+        services = self.services()
+        frame = self.frame(services["BOUNDARY_LOCAL_DIAGNOSTIC"],
+                           {"communication_id": "probe-flagged-answered",
+                            "message_class": "ecosystem.communication", "subject": "probe", "body": {}},
+                           "probe-flagged-answered", derived_from_clock=True)
+        kernel.publish_frame(frame, root=self.mesh)
+        (item,) = kernel.consume_and_respond(self.copy, mesh_root=self.mesh, hb_epoch="4096")
+        reference = item["response_publication"]["frame"]["heartbeat_reference"]
+        self.assertEqual((reference["epoch"], reference["derived_from_clock"]), (4096, False))
+
+    def test_an_invalid_supplied_epoch_is_invalid_whatever_the_frame_carries(self):
+        frame = self.frame(self.services()["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": 1}, "probe-invalid")
+        before = self.snapshot()
+        for value in ("+33", "", "31"):
+            with self.assertRaises(kernel.SuppliedEpochRefused) as refused:
+                kernel.ingest_frame(self.copy, frame, mesh_root=self.mesh, hb_epoch=value)
+            self.assertEqual(refused.exception.refusal["failure_code"], "HB_EPOCH_INVALID")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_supplied_epoch_that_differs_from_the_frames_is_a_conflict(self):
+        services = self.services()
+        before = self.snapshot()
+        for service, payload in ((services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": 1}),
+                                 (services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-conflict-work",
+                                                                      "message_class": "ecosystem.work.request",
+                                                                      "subject": "probe", "body": {}}),
+                                 (ADDRESS, diagnostic("probe-conflict-capability"))):
+            with self.assertRaises(kernel.SuppliedEpochRefused) as refused:
+                kernel.ingest_frame(self.copy, self.frame(service, payload, "probe-conflict", epoch=77),
+                                    mesh_root=self.mesh, hb_epoch="4096")
+            refusal = refused.exception.refusal
+            self.assertEqual(refusal["failure_code"], "HB_EPOCH_CONFLICT")
+            for field in SuppliedEpochParsingTests.SIX_FIELDS:
+                self.assertIn(field, refusal)
+        self.assertEqual(self.snapshot(), before)
+        # In a cycle the conflicting frame is quarantined and nothing is stamped at either epoch.
+        self.publish(ADDRESS, diagnostic("probe-conflict-cycle"), "probe-conflict-cycle", epoch=77)
+        cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_conflict", self.copy / "resident-runtime/federation_cycle.py"))
+        cycle.__spec__.loader.exec_module(cycle)
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        marker, = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json")]
+        self.assertEqual(marker["refusal"]["refused_failure_code"], "HB_EPOCH_CONFLICT")
+        self.assertEqual(self.receipts("STEGVERSE_REPO_LEDGER_ROOT",
+                                       "stegverse.repo-transition-receipt/v1"), [])
+        self.assertFalse(any(":response:" in json.loads(path.read_text(encoding="utf-8"))["packet_id"]
+                             for path in (self.mesh / "frames.d").glob("*.json")))
+
+    def gateway(self, fetched):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "gateway_probe", self.copy / "resident-runtime/federation_gateway_transport.py"))
+        module.__spec__.loader.exec_module(module)
+        sent = []
+        patchers = [mock.patch.object(module, "fetch_frame", return_value=fetched),
+                    mock.patch.object(module, "submit_frame", side_effect=lambda frame: sent.append(frame) or {}),
+                    mock.patch.object(module, "_json_request",
+                                      side_effect=lambda method, path, body=None, headers=None:
+                                      sent.append(body) or {"state": (body or {}).get("state")})]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return module, sent
+
+    def test_the_gateway_acknowledgement_is_stamped_from_the_cycle_epoch(self):
+        services = self.services()
+        frame = self.frame(services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-gateway",
+                                                                "message_class": "ecosystem.monitor.request",
+                                                                "subject": "probe", "body": {}},
+                           "probe-gateway")
+        gateway, sent = self.gateway({"state": "FRAME_AVAILABLE", "frame": frame})
+        clock = self.unavailable_clock(gateway, gateway.K)
+        result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+        self.assertEqual((result["state"], result["responses_emitted"]), ("CONSUMED", 1))
+        response, ack = sent
+        self.assertEqual(response["heartbeat_reference"]["epoch"], 4096)
+        self.assertNotIn("observed_at", ack)
+        self.assertEqual((ack["hb_reference"]["epoch"], ack["hb_reference"]["derived_from_clock"]), (4096, False))
+        self.assertFalse(clock.now.called)
+
+    def test_a_refused_gateway_frame_is_acknowledged_terminal_without_the_clock(self):
+        frame = self.frame(self.services()["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": 1}, "probe-gateway-refused",
+                           sampled_unix_ns=self.CLOCK_NS)
+        gateway, sent = self.gateway({"state": "FRAME_AVAILABLE", "frame": frame})
+        result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+        self.assertEqual(result["state"], "REFUSED")
+        self.assertEqual(result["refusal"]["failure_code"], "FRAME_REFUSED_QUARANTINED")
+        ack, = sent
+        self.assertEqual(ack["state"], "BLOCKED")
+        self.assertEqual(ack["refusal"]["refused_failure_code"], "HB_EPOCH_INVALID")
+        self.assertEqual(ack["hb_reference"]["epoch"], 4096)
+        self.assertNotIn(str(self.CLOCK_NS), json.dumps(ack))
+
+    def test_the_gateway_cycle_refuses_without_an_epoch_before_fetching(self):
+        gateway, sent = self.gateway({"state": "NO_FRAME"})
+        with self.assertRaises(gateway.K.SuppliedEpochRefused) as refused:
+            gateway.resident_gateway_cycle(self.copy)
+        self.assertEqual(refused.exception.refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        gateway.fetch_frame.assert_not_called()
+        self.assertEqual(sent, [])

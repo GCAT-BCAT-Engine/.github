@@ -293,14 +293,21 @@ def carried_provenance_failure(reference:dict[str,Any])->str|None:
         return "the carried epoch is not the organization ledger head's epoch"
     return None
 
-def carried_frame_epoch(frame:dict[str,Any])->int:
-    """The epoch a carrier frame carries, checked by the shared rule, or SuppliedEpochRefused.
+HB_EPOCH_CONFLICT="HB_EPOCH_CONFLICT"
 
-    The reference is bound to the frame by its digest. A clock-sampled, unmarked
-    or clock-flagged one is refused six-field, as is a CARRIED claim that does
-    not verify against the organization ledger head; no clock is read.
+def carried_frame_epoch(frame:dict[str,Any])->int|None:
+    """The epoch a carrier frame lends, checked by the shared rule, or SuppliedEpochRefused.
+
+    The reference is bound to the frame by its digest. A clock-flagged one
+    (`derived_from_clock` exactly true) lends no epoch and returns None: the
+    frame is consumed, and a route that needs an epoch refuses NOT_SUPPLIED
+    (NARROW S1, pending WU-B13). An unmarked or clock-sampled one is refused
+    six-field, as is a CARRIED claim that does not verify against the
+    organization ledger head. No clock is read.
     """
     reference=frame.get("heartbeat_reference")
+    if isinstance(reference,dict) and reference.get("derived_from_clock") is True:
+        return None
     epoch=reference.get("epoch") if isinstance(reference,dict) else None
     refusal=writer_epoch_refusal(epoch,retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT,
                                  reference=reference if reference is not None else {})
@@ -320,22 +327,43 @@ def carried_frame_epoch(frame:dict[str,Any])->int:
             "derived_from_clock":False,"consequence_committed":False})
     return int(str(epoch))
 
-def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None)->dict[str,Any]:
+def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
+                 hb_epoch:Any=None)->dict[str,Any]:
+    """Consume one addressed frame at the epoch it is supplied, or refuse six-field.
+
+    An explicit `hb_epoch` (the cycle's) is checked by the shared rule first;
+    an invalid one is HB_EPOCH_INVALID whatever the frame carries. The frame's
+    epoch is checked before dispatch. When both are present and differ the
+    frame is HB_EPOCH_CONFLICT and nothing is written; when only one is present
+    it is the supplied epoch for everything done in response to the frame: the
+    receiving operation's receipts, the control status and the response frame.
+    """
     packet=recover_packet(frame)
     registry=load_registry(root)
     if frame["destination_org"]!=registry["organization"]:
         return {"status":"IGNORED_NOT_ADDRESSED","packet_id":frame["packet_id"]}
-    # The frame's epoch is checked before dispatch, so a frame whose time is a
-    # clock reading is consumed by no route. Once validated it is the supplied
-    # epoch for everything done in response to the frame: the receiving
-    # operation's receipts, the control status and the response frame.
-    hb_epoch=carried_frame_epoch(frame)
-    result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=hb_epoch)
-    return {"status":"CONSUMED","packet":packet,"execution_result":result,"carried_hb_epoch":hb_epoch}
+    explicit=None
+    if hb_epoch is not None:
+        explicit=supplied_hb_reference(hb_epoch,retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT)["epoch"]
+    carried=carried_frame_epoch(frame)
+    if explicit is not None and carried is not None and explicit!=carried:
+        raise SuppliedEpochRefused({
+            "disposition":"FAIL_CLOSED","failure_code":HB_EPOCH_CONFLICT,
+            "failed_predicate":HB_EPOCH_PREDICATE,
+            "detail":"the supplied epoch "+str(explicit)+" is not the frame's epoch "+str(carried),
+            "required_evidence_or_repair":"supply the frame's own epoch, or none so the frame's epoch is used",
+            "retry_entrypoint":INGEST_EPOCH_RETRY_ENTRYPOINT,
+            "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt":"nothing was written; retry with one epoch",
+            "derived_from_clock":False,"consequence_committed":False})
+    epoch=explicit if explicit is not None else carried
+    result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=epoch)
+    return {"status":"CONSUMED","packet":packet,"execution_result":result,
+            "carried_hb_epoch":carried,"hb_epoch":epoch}
 
 __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispatch","persist_outbox","ingest_frame",
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
-         "HB_EPOCH_PROVENANCE_UNMARKED","carried_frame_epoch","carried_provenance_failure",
+         "HB_EPOCH_PROVENANCE_UNMARKED","HB_EPOCH_CONFLICT","carried_frame_epoch","carried_provenance_failure",
          "CARRIED_PROVENANCE_UNVERIFIED",
          "supplied_epoch_failure","SHARED_VALIDATOR_SHA256","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
 
@@ -644,8 +672,11 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
                         hb_epoch:Any=None)->list[dict[str,Any]]:
     """Consume addressed frames and publish each response.
 
-    A response frame references the supplied `hb_epoch` when there is one, and
-    otherwise the epoch its request frame carried; never a clock reading.
+    A response frame references the epoch its request was consumed at: the
+    supplied `hb_epoch`, or the epoch the request frame carried (the two must
+    agree). A clock-flagged request with no supplied epoch lends none, so its
+    response is refused NOT_SUPPLIED and recorded on its seen marker; never a
+    clock reading.
     """
     if hb_epoch is not None:
         hb_epoch=supplied_hb_reference(hb_epoch,retry_entrypoint=CONSUME_EPOCH_RETRY_ENTRYPOINT)["epoch"]
@@ -659,7 +690,7 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
         payload=packet.get("payload") or {}
         message_class=payload.get("message_class")
         try:
-            result=ingest_frame(repo_root,item["frame"],mesh_root=mesh_root)
+            result=ingest_frame(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
         except ValueError as exc:
             # A six-field refusal, from whichever kernel copy refused: the
             # frame's epoch, or the receiving operation's. Nothing was written.
@@ -670,8 +701,10 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
         if result.get("status")=="CONSUMED" and message_class in {
             "ecosystem.monitor.request","ecosystem.work.request","ecosystem.communication"}:
             response=build_control_response(packet,result["execution_result"])
-            epoch=hb_epoch if hb_epoch is not None else result["carried_hb_epoch"]
-            response_publication=publish_packet(response,root=mesh_root,epoch=epoch)
+            if result["hb_epoch"] is None:
+                result["response_refusal"]=writer_epoch_refusal(None,retry_entrypoint=CONSUME_EPOCH_RETRY_ENTRYPOINT)
+            else:
+                response_publication=publish_packet(response,root=mesh_root,epoch=result["hb_epoch"])
         marker=mark_federation_frame_seen(repo_root,item["path"],item["frame"],result)
         out.append({"path":item["path"],"result":result,"response_publication":response_publication,"seen_marker":str(marker)})
     return out
@@ -760,6 +793,8 @@ def mark_federation_frame_seen(repo_root:Path, frame_path:str, frame:dict[str,An
     }
     if isinstance(result.get("refusal"),dict):
         marker["refusal"]=dict(result["refusal"])
+    if isinstance(result.get("response_refusal"),dict):
+        marker["response_refusal"]=dict(result["response_refusal"])
     marker_path=seen_dir/(hashlib.sha256(frame_name.encode()).hexdigest()+".json")
     if marker_path.exists():
         if json.loads(marker_path.read_text())!=marker:

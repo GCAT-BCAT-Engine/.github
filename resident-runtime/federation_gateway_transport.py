@@ -2,7 +2,6 @@
 """Outbound-only Service Gateway transport for organization federation."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import importlib.util
 import json
 import os
@@ -83,17 +82,26 @@ def fetch_frame(organization: str) -> dict[str, Any]:
     )
 
 
-def acknowledge_frame(organization: str, frame: dict[str, Any], state: str) -> dict[str, Any]:
+#: A gateway cycle's epoch is supplied by the federation cycle and stamps the
+#: acknowledgement; no clock is read for it.
+GATEWAY_EPOCH_RETRY_ENTRYPOINT = "resident-runtime/federation_gateway_transport.py::resident_gateway_cycle (hb_epoch=)"
+
+
+def acknowledge_frame(organization: str, frame: dict[str, Any], state: str, *,
+                      hb_epoch: Any = None, refusal: dict[str, Any] | None = None) -> dict[str, Any]:
+    heartbeat = K.supplied_hb_reference(hb_epoch, retry_entrypoint=GATEWAY_EPOCH_RETRY_ENTRYPOINT)
     ack = {
         "schema": "stegverse.org-federation-rendezvous.ack/v1",
         "organization": organization,
         "packet_id": frame["packet_id"],
         "frame_sha256": frame["frame_sha256"],
         "state": state,
-        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "hb_reference": heartbeat,
         "gateway_execution_authority": "NONE",
         "authority_effect": "NONE_OBSERVATION_ONLY",
     }
+    if refusal is not None:
+        ack["refusal"] = dict(refusal)
     return _json_request(
         "POST",
         "/api/org-federation/v1/acknowledgements",
@@ -174,11 +182,14 @@ def _persist_response(repo_root: Path, packet: dict[str, Any], execution_result:
 
 
 def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> dict[str, Any]:
-    """Consume one gateway frame and submit its response.
+    """Consume one gateway frame, submit its response, and acknowledge it.
 
-    The response frame references `hb_epoch` when the cycle supplies one, and
-    otherwise the epoch the request frame carried; never a clock reading.
+    The cycle's `hb_epoch` is checked first and stamps the response frame and
+    the acknowledgement; never a clock reading. A frame refused six-field at
+    ingest is acknowledged BLOCKED with its quarantine refusal, so this
+    boundary does not consume it again.
     """
+    ack_epoch = K.supplied_hb_reference(hb_epoch, retry_entrypoint=GATEWAY_EPOCH_RETRY_ENTRYPOINT)["epoch"]
     registry = K.load_registry(repo_root)
     organization = registry["organization"]
     fetched = fetch_frame(organization)
@@ -195,7 +206,12 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
         raise FederationGatewayTransportError("unexpected gateway fetch state")
     frame = fetched["frame"]
     packet = K.recover_packet(frame)
-    result = K.ingest_frame(repo_root, frame)
+    try:
+        result = K.ingest_frame(repo_root, frame, hb_epoch=ack_epoch)
+    except ValueError as exc:
+        if not isinstance(getattr(exc, "refusal", None), dict):
+            raise
+        result = K.quarantine_result(frame, exc.refusal)
     response_emitted = 0
     response_ref = None
     if result.get("status") == "CONSUMED":
@@ -203,8 +219,7 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
         message_class = (packet.get("payload") or {}).get("message_class")
         if message_class in {"ecosystem.monitor.request", "ecosystem.work.request", "ecosystem.communication"}:
             response = K.build_control_response(packet, execution)
-            response_frame = K.carrier_frame(
-                response, epoch=hb_epoch if hb_epoch is not None else result["carried_hb_epoch"])
+            response_frame = K.carrier_frame(response, epoch=result["hb_epoch"])
             submit_frame(response_frame)
             response_emitted = 1
             response_ref = response_frame["frame_sha256"]
@@ -213,11 +228,13 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
         ack_state = "CONSUMED"
     else:
         ack_state = "BLOCKED"
-    ack = acknowledge_frame(organization, frame, ack_state)
+    ack = acknowledge_frame(organization, frame, ack_state, hb_epoch=ack_epoch,
+                            refusal=result.get("refusal"))
     return {
         "schema_version": "stegverse.org-federation-gateway-cycle.v1",
         "organization": organization,
-        "state": ack_state,
+        "state": "REFUSED" if result.get("status") == "REFUSED" else ack_state,
+        "refusal": result.get("refusal"),
         "packet_id": frame["packet_id"],
         "frame_sha256": frame["frame_sha256"],
         "frames_consumed": 1 if ack_state == "CONSUMED" else 0,
