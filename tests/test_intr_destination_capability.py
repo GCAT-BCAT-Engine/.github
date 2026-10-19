@@ -1030,7 +1030,6 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
             packet_id="probe-clock-frame")
         supplied = kernel.carrier_frame(packet, epoch=4096)
         cases = (
-            (kernel.carrier_frame(packet, now_ns=self.CLOCK_NS), "HB_EPOCH_INVALID"),
             (_forged_frame(supplied, sampled_unix_ns=self.CLOCK_NS), "HB_EPOCH_INVALID"),
             (_forged_frame({**supplied, "heartbeat_reference": {
                 key: value for key, value in supplied["heartbeat_reference"].items()
@@ -1041,11 +1040,13 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
                 kernel.ingest_frame(ROOT, frame, mesh_root=self.mesh)
             self.assertEqual(refused.exception.refusal["failure_code"], failure_code)
         self.assertEqual(kernel.ingest_frame(ROOT, supplied, mesh_root=self.mesh)["carried_hb_epoch"], 4096)
-        # NARROW S1: a clock-flagged frame is consumed and lends no epoch.
-        flagged = kernel.ingest_frame(ROOT, _forged_frame(supplied, derived_from_clock=True),
-                                      mesh_root=self.mesh)
-        self.assertEqual((flagged["status"], flagged["carried_hb_epoch"], flagged["hb_epoch"]),
-                         ("CONSUMED", None, None))
+        # NARROW S1 (07:48Z, 08:10Z): a CLOCK frame -- flagged true, or the legacy
+        # bare sample -- is consumed and lends no epoch.
+        for clock_frame in (_forged_frame(supplied, derived_from_clock=True),
+                            kernel.carrier_frame(packet, now_ns=self.CLOCK_NS)):
+            consumed = kernel.ingest_frame(ROOT, clock_frame, mesh_root=self.mesh)
+            self.assertEqual((consumed["status"], consumed["carried_hb_epoch"], consumed["hb_epoch"]),
+                             ("CONSUMED", None, None))
 
     def test_a_response_and_the_monitor_status_carry_the_request_frames_epoch(self):
         self.unavailable_clock(kernel)
@@ -1262,23 +1263,35 @@ class FrameEpochReachesTheOperationTests(CopiedRepository):
     def test_a_refused_frame_is_quarantined_and_does_not_hold_back_the_next_cycle(self):
         services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
         self.publish(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "valid"}, "probe-batch-valid")
+        # A legacy CLOCK frame is consumed without an epoch (08:10Z); an unmarked one is refused.
         self.clock_frame(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "clock"}, "probe-batch-clock")
+        unmarked = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=services["BOUNDARY_LOCAL_DIAGNOSTIC"],
+            payload={"probe": "unmarked"}, transition_reference="intr:transition:probe-batch-unmarked",
+            authority_effect="NONE", packet_id="probe-batch-unmarked")
+        supplied = kernel.carrier_frame(unmarked, epoch=4096)
+        kernel.publish_frame(_forged_frame({**supplied, "heartbeat_reference": {
+            key: value for key, value in supplied["heartbeat_reference"].items()
+            if key != "derived_from_clock"}}), root=self.mesh)
         cycle = self.cycle()
         clock = self.unavailable_clock(cycle, cycle.K, cycle.GW)
         with mock.patch("builtins.print"):
             self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
         record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
         self.assertEqual((record["frames_seen"], record["frames_consumed"], record["frames_refused"]),
-                         (2, 1, 1))
+                         (3, 2, 1))
         markers = [json.loads(path.read_text(encoding="utf-8"))
                    for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json")]
         quarantined, = [marker for marker in markers if marker["status"] == "REFUSED"]
-        self.assertEqual(quarantined["packet_id"], "probe-batch-clock")
+        self.assertEqual(quarantined["packet_id"], "probe-batch-unmarked")
         refusal = quarantined["refusal"]
         self.assertEqual(refusal["failure_code"], "FRAME_REFUSED_QUARANTINED")
-        self.assertEqual(refusal["refused_failure_code"], "HB_EPOCH_INVALID")
+        self.assertEqual(refusal["refused_failure_code"], "HB_EPOCH_PROVENANCE_UNMARKED")
         for field in SuppliedEpochParsingTests.SIX_FIELDS:
             self.assertIn(field, refusal)
+        consumed, = [marker for marker in markers if marker["packet_id"] == "probe-batch-clock"]
+        self.assertEqual(consumed["status"], "CONSUMED")
 
         self.publish(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "next"}, "probe-batch-next", epoch=4097)
         with mock.patch("builtins.print"):
@@ -1547,6 +1560,33 @@ class NarrowClockFlagAndEpochConflictTests(CopiedRepository):
         self.assertEqual(item["result"]["response_refusal"]["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
         marker = json.loads(Path(item["seen_marker"]).read_text(encoding="utf-8"))
         self.assertEqual(marker["response_refusal"]["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        self.assertEqual(clock.now.call_count, 0)
+
+    def test_a_legacy_clock_frame_is_consumed_and_its_epoch_needing_routes_refuse(self):
+        services = self.services()
+        clocked = []
+        for service, payload, packet_id in (
+                (services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "legacy"}, "probe-legacy-diagnostic"),
+                (services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-legacy-monitor",
+                                                      "message_class": "ecosystem.monitor.request",
+                                                      "subject": "probe", "body": {}}, "probe-legacy-monitor"),
+                (ADDRESS, diagnostic("probe-legacy-capability"), "probe-legacy-capability")):
+            packet = kernel.build_packet(
+                origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+                destination_org=THIS, destination_service=service, payload=payload,
+                transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+                packet_id=packet_id)
+            clocked.append(kernel.carrier_frame(packet, now_ns=self.CLOCK_NS))
+        self.assertNotIn("derived_from_clock", clocked[0]["heartbeat_reference"])
+        clock = self.unavailable_clock(*_kernel_instances(ingress, capability, kernel))
+        consumed = kernel.ingest_frame(self.copy, clocked[0], mesh_root=self.mesh)
+        self.assertEqual((consumed["status"], consumed["hb_epoch"]), ("CONSUMED", None))
+        for frame in clocked[1:]:
+            with self.assertRaises(ValueError) as refused:
+                kernel.ingest_frame(self.copy, frame, mesh_root=self.mesh)
+            self.assertEqual(refused.exception.refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        self.assertEqual(self.receipts("STEGVERSE_REPO_LEDGER_ROOT",
+                                       "stegverse.repo-transition-receipt/v1"), [])
         self.assertEqual(clock.now.call_count, 0)
 
     def test_a_supplied_epoch_answers_a_clock_flagged_frame(self):

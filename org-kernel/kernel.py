@@ -332,15 +332,19 @@ HB_EPOCH_CONFLICT="HB_EPOCH_CONFLICT"
 def carried_frame_epoch(frame:dict[str,Any])->int|None:
     """The epoch a carrier frame lends, checked by the shared rule, or SuppliedEpochRefused.
 
-    The reference is bound to the frame by its digest. A clock-flagged one
-    (`derived_from_clock` exactly true) lends no epoch and returns None: the
-    frame is consumed, and a route that needs an epoch refuses NOT_SUPPLIED
-    (NARROW S1, pending WU-B13). An unmarked or clock-sampled one is refused
-    six-field, as is a CARRIED claim that does not verify against the
-    organization ledger head. No clock is read.
+    The reference is bound to the frame by its digest. A CLOCK one -- flagged
+    (`derived_from_clock` exactly true), or the legacy bare sample (no flag,
+    `sampled_unix_ns` present) -- lends no epoch and returns None: the frame is
+    consumed, and a route that needs an epoch refuses NOT_SUPPLIED (NARROW S1,
+    pending WU-B13). Otherwise the shared rule decides: an unmarked reference
+    (no flag, no sample) is refused six-field, as is one that claims SUPPLIED
+    while carrying a sample, and a CARRIED claim that does not verify against
+    the organization ledger head. No clock is read.
     """
     reference=frame.get("heartbeat_reference")
-    if isinstance(reference,dict) and reference.get("derived_from_clock") is True:
+    if isinstance(reference,dict) and (reference.get("derived_from_clock") is True
+                                       or ("derived_from_clock" not in reference
+                                           and "sampled_unix_ns" in reference)):
         return None
     epoch=reference.get("epoch") if isinstance(reference,dict) else None
     refusal=writer_epoch_refusal(epoch,retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT,
