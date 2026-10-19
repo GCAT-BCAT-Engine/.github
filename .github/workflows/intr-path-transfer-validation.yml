@@ -102,6 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           export STEGVERSE_ORG_LEDGER_ROOT="git+$GITHUB_WORKSPACE#$DRY_RUN_REF"
+          export STEGVERSE_ORG_LEDGER_GIT_DIR="$GITHUB_WORKSPACE/.git"
           export STEGVERSE_REPO_LEDGER_ROOT="git+$GITHUB_WORKSPACE#$DRY_RUN_REF:$REPO_LEDGER_NAMESPACE"
           python3 resident-runtime/intr_path_transfer.py verify --expect-source FAIL_CLOSED --out "$RUNNER_TEMP/results/real-state.json" > /dev/null
           python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["counts"]["ALLOW"] == 0, r["counts"]; print("INTR_PATH_REAL_STATE", json.dumps(r["counts"]))' "$RUNNER_TEMP/results/real-state.json"
@@ -116,6 +117,7 @@ jobs:
           python3 resident-runtime/intr_path_ledger.py which
           set -euo pipefail
           export STEGVERSE_ORG_LEDGER_ROOT="git+$GITHUB_WORKSPACE#$DRY_RUN_REF"
+          export STEGVERSE_ORG_LEDGER_GIT_DIR="$GITHUB_WORKSPACE/.git"
           export STEGVERSE_REPO_LEDGER_ROOT="git+$GITHUB_WORKSPACE#$DRY_RUN_REF:$REPO_LEDGER_NAMESPACE"
           # a main merge whose main-merge transfer receipt is on the ledger (pinned in the expected real state)
           base=$(python3 -c 'import json; print(json.load(open("tests/fixtures/intr-path-transfer/expected-real-state.json"))["verified_transfer_commit"])')
