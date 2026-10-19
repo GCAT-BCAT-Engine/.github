@@ -309,7 +309,16 @@ def build_packet(*, origin_org:str, origin_service:str, destination_org:str, des
     }
 
 def publish_packet(packet:dict[str,Any], *, root:Path|None=None, now_ns:int|None=None,
-                   epoch:int|None=None)->dict[str,Any]:
+                   epoch:Any=None)->dict[str,Any]:
+    """Publish a packet's carrier frame.
+
+    A supplied `epoch` is checked by `supplied_epoch_failure` before anything is
+    published: ASCII digits (an int as its decimal text) with value >= 32, else
+    SuppliedEpochRefused carrying the six-field FAIL_CLOSED. `epoch=None` keeps
+    the clock-sampled reference; no epoch-taking receipt writer reaches it.
+    """
+    if epoch is not None:
+        epoch=supplied_hb_reference(epoch,retry_entrypoint="org-kernel/kernel.py::publish_packet")["epoch"]
     frame=carrier_frame(packet,now_ns=now_ns,epoch=epoch)
     path=publish_frame(frame,root=root)
     return {"packet":packet,"frame":frame,"path":str(path)}

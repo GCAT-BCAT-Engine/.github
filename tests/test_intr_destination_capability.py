@@ -509,5 +509,101 @@ class AddressedAndClosedTests(RedirectedLedgers):
                                       "stegverse.organization-transition-receipt/v1"))
 
 
+
+class SuppliedEpochParsingTests(RedirectedLedgers):
+    """--hb-epoch and publish_packet(epoch=) are read by the shared rule, not coerced."""
+
+    REFUSED = (None, "+33", " 33", "\u0663\u0663", "\uff13\uff13", "True", "abc", "33.7", "-1", "31")
+    SIX_FIELDS = ("failure_code", "failed_predicate", "required_evidence_or_repair",
+                  "retry_entrypoint", "owning_existing_goal", "next_attempt")
+
+    def assert_six_field_refusal(self, refusal, epoch, retry_entrypoint):
+        for field in self.SIX_FIELDS:
+            self.assertTrue(refusal.get(field), field)
+        self.assertEqual(refusal["disposition"], "FAIL_CLOSED")
+        self.assertEqual(refusal["failed_predicate"], "SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH")
+        self.assertEqual(refusal["failure_code"],
+                         "HB_EPOCH_NOT_SUPPLIED" if epoch is None else "HB_EPOCH_INVALID")
+        self.assertEqual(refusal["retry_entrypoint"], retry_entrypoint)
+        self.assertIs(refusal["consequence_committed"], False)
+
+    def nothing_written(self):
+        for variable in self.LEDGER_ROOTS:
+            self.assertFalse(Path(os.environ[variable]).exists(), variable)
+        self.assertFalse(self.mesh.exists())
+
+    def command(self, mode, epoch, out):
+        work = Path(self._work.name)
+        args = ["python3", str(ROOT / "resident-runtime/intr_destination_ingress.py"),
+                "--registry", str(ROOT / "org-boundary/registry/services.json"),
+                "--out", str(out)]
+        if mode == "self-close":
+            args += ["--self-close", "--communication-id", "epoch-parsing-diagnostic"]
+        else:
+            (work / "payload.json").write_text(json.dumps(diagnostic("epoch-parsing-diagnostic")),
+                                               encoding="utf-8")
+            args += ["--payload", str(work / "payload.json")]
+        if epoch is not None:
+            args.append("--hb-epoch=" + epoch)
+        return subprocess.run(args, env=dict(os.environ), capture_output=True, text=True)
+
+    def test_the_ingress_command_refuses_an_unparsed_epoch_and_writes_nothing(self):
+        for mode in ("payload", "self-close"):
+            for epoch in self.REFUSED:
+                with self.subTest(mode=mode, epoch=epoch):
+                    out = Path(self._work.name) / "out.json"
+                    run = self.command(mode, epoch, out)
+                    self.assertEqual(run.returncode, 1, run.stderr)
+                    self.assertNotIn("Traceback", run.stderr)
+                    self.assert_six_field_refusal(json.loads(run.stdout), epoch,
+                                                  ingress.EPOCH_RETRY_ENTRYPOINT)
+                    self.assertFalse(out.exists())
+                    self.nothing_written()
+
+    def test_the_ingress_command_accepts_a_large_ascii_epoch(self):
+        for mode in ("payload", "self-close"):
+            with self.subTest(mode=mode):
+                out = Path(self._work.name) / (mode + ".json")
+                run = self.command(mode, "4096", out)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                result = json.loads(out.read_text(encoding="utf-8"))
+                self.assertEqual(result["disposition"], "ALLOW")
+                receipts = self.receipts("STEGVERSE_REPO_LEDGER_ROOT",
+                                         "stegverse.repo-transition-receipt/v1")
+                self.assertTrue(receipts)
+                self.assertEqual({r["hb_reference"]["epoch"] for r in receipts}, {4096})
+
+    def packet(self):
+        return kernel.build_packet(
+            origin_org=THIS, origin_service=ADDRESS, destination_org=PEER,
+            destination_service=kernel.organization_slug(PEER) + "." + PROFILE_ID,
+            payload=diagnostic("publish-epoch-diagnostic"),
+            transition_reference="intr:transition:publish-epoch",
+            authority_effect="NONE", packet_id="publish-epoch")
+
+    def test_publish_packet_refuses_an_unparsed_epoch_and_publishes_nothing(self):
+        # epoch=None keeps the clock-sampled reference (WU-B13); the absent
+        # case here is an empty supplied value.
+        for epoch in ("",) + self.REFUSED[1:] + (True, -1, 31, 33.7):
+            with self.subTest(epoch=epoch):
+                with self.assertRaises(kernel.SuppliedEpochRefused) as raised:
+                    kernel.publish_packet(self.packet(), root=self.mesh, epoch=epoch)
+                refusal = raised.exception.refusal
+                for field in self.SIX_FIELDS:
+                    self.assertTrue(refusal.get(field), field)
+                self.assertEqual(refusal["failure_code"], "HB_EPOCH_INVALID")
+                self.assertEqual(refusal["retry_entrypoint"],
+                                 "org-kernel/kernel.py::publish_packet")
+                self.nothing_written()
+
+    def test_publish_packet_accepts_a_supplied_ascii_epoch(self):
+        for epoch in ("4096", 4096, "32"):
+            with self.subTest(epoch=epoch):
+                published = kernel.publish_packet(self.packet(), root=self.mesh, epoch=epoch)
+                self.assertEqual(published["frame"]["heartbeat_reference"],
+                                 kernel.hb_reference(epoch=int(str(epoch))))
+                self.assertTrue(Path(published["path"]).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

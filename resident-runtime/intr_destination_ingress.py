@@ -75,6 +75,11 @@ def _module(name: str, relative: str):
 
 
 ledger = _module("dual_ledger", "resident-runtime/dual_ledger.py")
+kernel = _module("kernel", "org-kernel/kernel.py")
+
+# The command's --hb-epoch is read as text and checked by the shared
+# supplied-epoch rule before anything is written; argparse does not coerce it.
+EPOCH_RETRY_ENTRYPOINT = "resident-runtime/intr_destination_ingress.py::main --hb-epoch"
 
 
 def canon(value: Any) -> bytes:
@@ -281,23 +286,29 @@ def main() -> int:
     parser.add_argument("--communication-id")
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--packet-id", default=None)
-    parser.add_argument("--hb-epoch", type=int, default=None)
+    parser.add_argument("--hb-epoch", type=str, default=None)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
+    if args.self_close and not args.communication_id:
+        parser.error("--self-close requires --communication-id")
+    if not args.self_close and args.payload is None:
+        parser.error("one of --payload or --self-close is required")
+    try:
+        hb_epoch = kernel.supplied_hb_reference(
+            args.hb_epoch, retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)["epoch"]
+    except kernel.SuppliedEpochRefused as exc:
+        print(json.dumps(exc.refusal, sort_keys=True))
+        return 1
     registry = json.loads(args.registry.read_text(encoding="utf-8"))
     if args.self_close:
-        if not args.communication_id:
-            parser.error("--self-close requires --communication-id")
         result = self_close(args.communication_id, registry=registry,
-                            packet_id=args.packet_id, hb_epoch=args.hb_epoch)
-    elif args.payload is not None:
+                            packet_id=args.packet_id, hb_epoch=hb_epoch)
+    else:
         result = receive(
             json.loads(args.payload.read_text(encoding="utf-8")),
             registry=registry,
             packet_id=args.packet_id or "organization-intr-destination",
-            hb_epoch=args.hb_epoch)
-    else:
-        parser.error("one of --payload or --self-close is required")
+            hb_epoch=hb_epoch)
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
