@@ -157,7 +157,8 @@ class WorkflowEpochGateTests(unittest.TestCase):
                               capture_output=True, text=True)
 
     def test_the_dispatch_epoch_step_emits_the_kernel_six_field_refusal(self):
-        cases = {"": "HB_EPOCH_INVALID", None: "HB_EPOCH_NOT_SUPPLIED",
+        # A workflow_dispatch input cannot tell empty from absent: both are NOT_SUPPLIED.
+        cases = {"": "HB_EPOCH_NOT_SUPPLIED", None: "HB_EPOCH_NOT_SUPPLIED",
                  "\uff13\uff13": "HB_EPOCH_INVALID", "\u0663\u0663": "HB_EPOCH_INVALID",
                  "+33": "HB_EPOCH_INVALID", " 33": "HB_EPOCH_INVALID", "33.0": "HB_EPOCH_INVALID",
                  "31": "HB_EPOCH_INVALID", "abc": "HB_EPOCH_INVALID"}
