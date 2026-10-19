@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           before=$(git --git-dir="$SCRATCH" rev-parse "$LEDGER_REF")
-          python3 resident-runtime/merge_transfer_gitstore.py append --commits-file "$RUNNER_TEMP/results/commits.txt" \
+          python3 resident-runtime/ledger_gitstore.py merge-transfer-append --commits-file "$RUNNER_TEMP/results/commits.txt" \
             --out "$RUNNER_TEMP/results/append.json"
           fresh="$RUNNER_TEMP/fresh-ledger.git"
           git init -q --bare "$fresh"
@@ -104,7 +104,7 @@ jobs:
           python3 resident-runtime/merge_transfer_gitstore.py verify --git-dir "$fresh" --ref "$LEDGER_REF" \
             --commits-file "$RUNNER_TEMP/results/commits.txt" --out "$RUNNER_TEMP/results/verify.json"
           tip=$(git --git-dir="$SCRATCH" rev-parse "$LEDGER_REF")
-          python3 resident-runtime/merge_transfer_gitstore.py append --commits-file "$RUNNER_TEMP/results/commits.txt" \
+          python3 resident-runtime/ledger_gitstore.py merge-transfer-append --commits-file "$RUNNER_TEMP/results/commits.txt" \
             --out "$RUNNER_TEMP/results/replay.json"
           test "$(git --git-dir="$SCRATCH" rev-parse "$LEDGER_REF")" = "$tip"
           python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert all(x["replayed"] is True for x in r), r' "$RUNNER_TEMP/results/replay.json"
