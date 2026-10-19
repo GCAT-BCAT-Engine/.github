@@ -15,7 +15,16 @@ def main():
         receipt["heartbeat_reference"]=K.hb_reference()
         receipt["transport"]="SHARED_SERVICE_GATEWAY"
     else:
-        results=K.consume_and_respond(ROOT)
+        try:
+            results=K.consume_and_respond(ROOT)
+        except ValueError as exc:
+            # A receiving operation's six-field epoch refusal. It is raised by
+            # whichever kernel copy that operation loaded, so it is read by its
+            # `refusal`, not its class. No cycle record is written.
+            if not isinstance(getattr(exc,"refusal",None),dict):
+                raise
+            print(json.dumps(exc.refusal,sort_keys=True))
+            return 1
         consumed=sum(1 for x in results if (x.get("result") or {}).get("status")=="CONSUMED")
         responses=sum(1 for x in results if x.get("response_publication"))
         receipt={
@@ -32,6 +41,7 @@ def main():
     out.parent.mkdir(parents=True,exist_ok=True)
     out.write_text(json.dumps(receipt,indent=2,sort_keys=True)+"\n")
     print(json.dumps(receipt,sort_keys=True))
+    return 0
 
 if __name__=="__main__":
-    main()
+    raise SystemExit(main())

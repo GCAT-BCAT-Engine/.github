@@ -759,3 +759,155 @@ class EpochProvenanceTests(RedirectedLedgers):
         self.assertEqual(reference["epoch"], 4096)
         self.assertIs(reference["derived_from_clock"], False)
         self.assert_no_laundered_epoch({4096})
+
+
+class ClockMarkerAndRuntimeEpochTests(RedirectedLedgers):
+    """B-P36g: no receipt is stamped from the clock, and a clock value is always marked.
+
+    `runtime/organization_runtime.py` stamps its ingress and activation receipts
+    from the supplied epoch, or refuses six-field before writing. The federation
+    cycle reports a receiving operation's epoch refusal as six fields, not a
+    traceback. With the clock patched, every clock value a route writes sits in
+    a reference that says so: `derived_from_clock` true or `sampled_unix_ns`.
+    """
+
+    CLOCK_NS = EpochProvenanceTests.CLOCK_NS
+    CLOCK_EPOCH = EpochProvenanceTests.CLOCK_EPOCH
+
+    def setUp(self):
+        super().setUp()
+        self.copy = Path(self._work.name) / "repo"
+        shutil.copytree(ROOT, self.copy, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        previous = os.environ.get("STEGVERSE_ORG_FEDERATION_ROOT")
+        os.environ["STEGVERSE_ORG_FEDERATION_ROOT"] = str(self.mesh)
+        self.addCleanup(lambda: os.environ.__setitem__("STEGVERSE_ORG_FEDERATION_ROOT", previous)
+                        if previous is not None else os.environ.pop("STEGVERSE_ORG_FEDERATION_ROOT", None))
+        gateway = os.environ.pop("STEGVERSE_ORG_FEDERATION_GATEWAY_URL", None)
+        if gateway is not None:
+            self.addCleanup(os.environ.__setitem__, "STEGVERSE_ORG_FEDERATION_GATEWAY_URL", gateway)
+
+    def runtime(self):
+        module = _module("organization_runtime_probe", "runtime/organization_runtime.py")
+        for name in ("ACTIVATIONS", "INGRESS", "EGRESS"):
+            patcher = mock.patch.object(module, name, Path(self._work.name) / "runtime" / name.lower())
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return module
+
+    def written(self, directory):
+        root = Path(self._work.name) / "runtime" / directory
+        return sorted(root.glob("*.json")) if root.is_dir() else []
+
+    def publish(self, service, payload, packet_id):
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=service, payload=payload,
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+            packet_id=packet_id)
+        kernel.publish_packet(packet, root=self.mesh, epoch=4096)
+
+    def test_runtime_ingress_and_activation_without_an_epoch_write_nothing(self):
+        runtime = self.runtime()
+        envelope = runtime.egress("probe-message", "PROBE", {"boundary": "B", "subsystem": "S"}, b"x")
+        for call in (lambda: runtime.ingress(envelope),
+                     lambda: runtime.activate("probe-activation", "probe-node")):
+            with self.assertRaises(runtime.kernel.SuppliedEpochRefused) as refused:
+                call()
+            self.assertEqual(refused.exception.refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+            self.assertIs(refused.exception.refusal["consequence_committed"], False)
+        self.assertEqual(self.written("ingress"), [])
+        self.assertEqual(self.written("activations"), [])
+
+    def test_runtime_receipts_reference_the_supplied_epoch_and_no_clock(self):
+        runtime = self.runtime()
+        envelope = runtime.egress("probe-message", "PROBE", {"boundary": "B", "subsystem": "S"}, b"x")
+        received = runtime.ingress(envelope, "4096")
+        activated = runtime.activate("probe-activation", "probe-node", "4096")
+        for receipt, clock_field in ((received, "validated_at"), (activated, "requested_at")):
+            self.assertNotIn(clock_field, receipt)
+            self.assertEqual(receipt["hb_reference"]["epoch"], 4096)
+            self.assertIs(receipt["hb_reference"]["derived_from_clock"], False)
+            self.assertNotIn("sampled_unix_ns", receipt["hb_reference"])
+        self.assertEqual(len(self.written("ingress")), 1)
+        self.assertEqual(len(self.written("activations")), 1)
+
+    def test_the_runtime_command_refuses_without_an_epoch_and_writes_nothing(self):
+        run = subprocess.run(
+            ["python3", str(self.copy / "runtime/organization_runtime.py"), "activate",
+             "--activation-id", "probe-activation", "--node-ref", "probe-node"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(run.returncode, 1, run.stderr)
+        refusal = json.loads(run.stdout)
+        self.assertEqual(refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, refusal)
+        self.assertFalse((self.copy / "runtime/activations").exists())
+
+    def test_the_federation_cycle_reports_an_epoch_refusal_as_six_fields(self):
+        self.publish(ADDRESS, diagnostic("probe-cycle"), "probe-cycle")
+        run = subprocess.run(["python3", str(self.copy / "resident-runtime/federation_cycle.py")],
+                             capture_output=True, text=True, check=False, env=dict(os.environ))
+        self.assertEqual(run.returncode, 1, run.stderr)
+        self.assertNotIn("Traceback", run.stderr)
+        refusal = json.loads(run.stdout)
+        self.assertEqual(refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, refusal)
+        self.assertFalse((self.copy / "resident-runtime/federation/latest-cycle.json").exists())
+        self.assertEqual(self.receipts("STEGVERSE_REPO_LEDGER_ROOT",
+                                       "stegverse.repo-transition-receipt/v1"), [])
+
+    def test_every_clock_value_a_route_writes_is_marked(self):
+        cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_probe", self.copy / "resident-runtime/federation_cycle.py"))
+        cycle.__spec__.loader.exec_module(cycle)
+        fixed = datetime.fromtimestamp(self.CLOCK_NS / 1_000_000_000, timezone.utc)
+        clock = mock.Mock(wraps=datetime)
+        clock.now = mock.Mock(return_value=fixed)
+        for module in (cycle, cycle.K, cycle.GW):
+            if getattr(module, "datetime", None) is datetime:
+                patcher = mock.patch.object(module, "datetime", clock)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+        services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
+        for role in ("BOUNDARY_LOCAL_DIAGNOSTIC", "BOUNDARY_LOCAL_CONTROL"):
+            self.publish(services[role], {"communication_id": "probe-" + role.lower(),
+                                          "message_class": "ecosystem.monitor.request",
+                                          "subject": "probe", "body": {}}, "probe-" + role.lower())
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(), 0)
+        self.assertTrue(clock.now.called)
+        runtime = self.runtime()
+        runtime.ingress(runtime.egress("probe-message", "PROBE",
+                                       {"boundary": "B", "subsystem": "S"}, b"x"), "4096")
+        runtime.activate("probe-activation", "probe-node", "4096")
+
+        clock_values = {self.CLOCK_EPOCH, self.CLOCK_NS, fixed.isoformat(),
+                        fixed.replace(microsecond=0).isoformat().replace("+00:00", "Z")}
+        unmarked, seen = [], 0
+
+        def walk(value, where):
+            nonlocal seen
+            if isinstance(value, dict):
+                marked = value.get("derived_from_clock") is True or "sampled_unix_ns" in value
+                for key, item in value.items():
+                    if not isinstance(item, (dict, list)) and item in clock_values:
+                        seen += 1
+                        if not marked:
+                            unmarked.append(where + "." + key)
+                    walk(item, where + "." + key)
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    walk(item, where + "[" + str(index) + "]")
+
+        written = [self.copy / "resident-runtime/federation/latest-cycle.json",
+                   *sorted((self.copy / "resident-runtime/federation/seen.d").glob("*.json")),
+                   *sorted((self.mesh / "frames.d").glob("*.json")),
+                   *self.written("ingress"), *self.written("activations"), *self.written("egress")]
+        for path in written:
+            document = json.loads(path.read_text(encoding="utf-8"))
+            walk(document, path.name)
+            if "packet_base64" in document:
+                walk(kernel.recover_packet(document), path.name + "#packet")
+        self.assertGreater(seen, 0)
+        self.assertEqual(unmarked, [])
