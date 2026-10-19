@@ -41,6 +41,14 @@ def main():
             result=K.collect_ecosystem_responses(org,args.communication_id)
         print(json.dumps(result,indent=2,sort_keys=True))
         return
+    # A published frame references the supplied --hb-epoch, checked by the
+    # kernel's shared rule before anything is published; never a clock reading.
+    try:
+        epoch=K.supplied_hb_reference(
+            args.hb_epoch,retry_entrypoint="resident-runtime/ecosystem_control.py::"+args.cmd+" (--hb-epoch)")["epoch"]
+    except K.SuppliedEpochRefused as exc:
+        print(json.dumps(exc.refusal,sort_keys=True))
+        raise SystemExit(1)
     body=json.loads(args.body_json)
     if os.getenv("STEGVERSE_ORG_FEDERATION_GATEWAY_URL","").strip():
         out=GW.publish_ecosystem_via_gateway(
@@ -49,7 +57,8 @@ def main():
             subject=args.subject,
             body=body,
             requested_action=args.requested_action,
-            communication_id=args.communication_id
+            communication_id=args.communication_id,
+            epoch=epoch
         )
     else:
         out=K.publish_ecosystem_from_directory(
@@ -59,7 +68,7 @@ def main():
             body=body,
             requested_action=args.requested_action,
             communication_id=args.communication_id,
-            epoch=args.hb_epoch
+            epoch=epoch
         )
     print(json.dumps({
       "status":"PUBLISHED",

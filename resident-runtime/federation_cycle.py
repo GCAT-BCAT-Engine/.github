@@ -16,7 +16,8 @@ EPOCH_RETRY_ENTRYPOINT="resident-runtime/federation_cycle.py::main (--hb-epoch, 
 
 def main(argv:list[str]|None=None)->int:
     ap=argparse.ArgumentParser()
-    ap.add_argument("--hb-epoch",default=os.environ.get("HB_EPOCH") or None,
+    # HB_EPOCH unset is NOT_SUPPLIED; set, even to "", it is read by the rule.
+    ap.add_argument("--hb-epoch",default=os.environ.get("HB_EPOCH"),
                     help="heartbeat epoch, ASCII digits >= 32; the cycle refuses when absent or invalid")
     args=ap.parse_args(argv)
     try:
@@ -29,12 +30,14 @@ def main(argv:list[str]|None=None)->int:
             results=K.consume_and_respond(ROOT,hb_epoch=heartbeat["epoch"])
             consumed=sum(1 for x in results if (x.get("result") or {}).get("status")=="CONSUMED")
             responses=sum(1 for x in results if x.get("response_publication"))
+            refused=sum(1 for x in results if (x.get("result") or {}).get("status")=="REFUSED")
             receipt={
               "schema_version":"stegverse.org-federation-cycle.v1",
               "organization":K.load_registry(ROOT)["organization"],
               "heartbeat_reference":heartbeat,
               "frames_seen":len(results),
               "frames_consumed":consumed,
+              "frames_refused":refused,
               "responses_emitted":responses,
               "authority_effect":"NONE_CARRIER_ONLY",
               "transport":"LOCAL_SPOOL_FALLBACK"

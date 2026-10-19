@@ -212,7 +212,7 @@ def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None, hb_ep
     if role==CAPABILITY_INGRESS_ROLE:
         try:
             application_result=capability_ingress(root).receive(
-                root,service,packet,registry=registry,mesh_root=mesh_root)
+                root,service,packet,registry=registry,mesh_root=mesh_root,hb_epoch=hb_epoch)
         except SystemExit as refused:
             raise ValueError("capability_ingress_refused:"+str(refused)) from None
         extra["processing_selection"]=NO_PROCESSOR_SELECTED
@@ -261,8 +261,9 @@ def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None)->d
     if frame["destination_org"]!=registry["organization"]:
         return {"status":"IGNORED_NOT_ADDRESSED","packet_id":frame["packet_id"]}
     # The frame's epoch is checked before dispatch, so a frame whose time is a
-    # clock reading is consumed by no route. It is carried, not supplied: it
-    # reaches the control status and the response frame, never a receipt writer.
+    # clock reading is consumed by no route. Once validated it is the supplied
+    # epoch for everything done in response to the frame: the receiving
+    # operation's receipts, the control status and the response frame.
     hb_epoch=carried_frame_epoch(frame)
     result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=hb_epoch)
     return {"status":"CONSUMED","packet":packet,"execution_result":result,"carried_hb_epoch":hb_epoch}
@@ -553,6 +554,25 @@ def build_control_response(request_packet:dict[str,Any], execution_result:dict[s
     )
 
 CONSUME_EPOCH_RETRY_ENTRYPOINT="org-kernel/kernel.py::consume_and_respond (hb_epoch=)"
+FRAME_REFUSED_QUARANTINED="FRAME_REFUSED_QUARANTINED"
+
+def quarantine_result(frame:dict[str,Any], refusal:dict[str,Any])->dict[str,Any]:
+    """A frame refused six-field at ingest, made terminal.
+
+    Its seen marker records this refusal, so it is never re-processed and does
+    not hold back the frames behind it. No clock is read and none is written.
+    """
+    return {"status":"REFUSED","packet_id":frame.get("packet_id"),
+            "refusal":{"disposition":"FAIL_CLOSED","failure_code":FRAME_REFUSED_QUARANTINED,
+                       "failed_predicate":refusal.get("failed_predicate"),
+                       "detail":"frame refused at ingest: "+str(refusal.get("failure_code"))+": "+str(refusal.get("detail")),
+                       "refused_failure_code":refusal.get("failure_code"),
+                       "required_evidence_or_repair":("the sender re-emits the packet in a new frame that "
+                                                      "carries a supplied epoch; this frame is terminal"),
+                       "retry_entrypoint":refusal.get("retry_entrypoint"),
+                       "owning_existing_goal":refusal.get("owning_existing_goal") or HB_EPOCH_OWNING_EXISTING_GOAL,
+                       "next_attempt":"this frame is never re-processed; the next frame and the next cycle proceed",
+                       "consequence_committed":False}}
 
 def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[str]|None=None,
                         hb_epoch:Any=None)->list[dict[str,Any]]:
@@ -572,7 +592,14 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
         packet=recover_packet(item["frame"])
         payload=packet.get("payload") or {}
         message_class=payload.get("message_class")
-        result=ingest_frame(repo_root,item["frame"],mesh_root=mesh_root)
+        try:
+            result=ingest_frame(repo_root,item["frame"],mesh_root=mesh_root)
+        except ValueError as exc:
+            # A six-field refusal, from whichever kernel copy refused: the
+            # frame's epoch, or the receiving operation's. Nothing was written.
+            if not isinstance(getattr(exc,"refusal",None),dict):
+                raise
+            result=quarantine_result(item["frame"],exc.refusal)
         response_publication=None
         if result.get("status")=="CONSUMED" and message_class in {
             "ecosystem.monitor.request","ecosystem.work.request","ecosystem.communication"}:
@@ -665,6 +692,8 @@ def mark_federation_frame_seen(repo_root:Path, frame_path:str, frame:dict[str,An
       "status":result.get("status"),
       "authority_effect":"NONE_CARRIER_ONLY"
     }
+    if isinstance(result.get("refusal"),dict):
+        marker["refusal"]=dict(result["refusal"])
     marker_path=seen_dir/(hashlib.sha256(frame_name.encode()).hexdigest()+".json")
     if marker_path.exists():
         if json.loads(marker_path.read_text())!=marker:

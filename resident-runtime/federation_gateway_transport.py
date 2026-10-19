@@ -110,6 +110,7 @@ def publish_ecosystem_via_gateway(
     body: dict[str, Any],
     requested_action: str | None = None,
     communication_id: str | None = None,
+    epoch: int | None = None,
 ) -> dict[str, Any]:
     registry = K.load_registry(repo_root)
     directory = K.load_federation_directory(repo_root)
@@ -126,7 +127,7 @@ def publish_ecosystem_via_gateway(
     )
     results = []
     for packet in built["packets"]:
-        frame = K.carrier_frame(packet)
+        frame = K.carrier_frame(packet, epoch=epoch)
         stored = submit_frame(frame)
         results.append({
             "organization": packet["destination"]["org"],

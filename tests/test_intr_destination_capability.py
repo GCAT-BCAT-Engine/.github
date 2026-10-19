@@ -305,7 +305,7 @@ class OperationReceiptTests(RedirectedLedgers):
 
 
 class AddressedAndClosedTests(RedirectedLedgers):
-    def publish(self, payload, service, packet_id, origin=PEER):
+    def publish(self, payload, service, packet_id, origin=PEER, epoch=4096):
         packet = kernel.build_packet(
             origin_org=origin,
             origin_service=kernel.organization_slug(origin) + "." + PROFILE_ID,
@@ -315,8 +315,12 @@ class AddressedAndClosedTests(RedirectedLedgers):
             authority_effect="NONE", packet_id=packet_id)
         # Place the frame in the temporary mesh. This is not an emission record
         # and not an authentic receipt. The frame carries a supplied epoch, so
-        # ingest admits it and the receiving operation decides.
-        kernel.publish_packet(packet, root=self.mesh, epoch=4096)
+        # ingest admits it and the receiving operation decides. epoch=None
+        # stands for a sender whose frame time is a clock reading.
+        if epoch is None:
+            kernel.publish_packet(packet, root=self.mesh, now_ns=kernel.HB_ANCHOR_UNIX_NS)
+        else:
+            kernel.publish_packet(packet, root=self.mesh, epoch=epoch)
         return packet
 
     def consume(self):
@@ -334,10 +338,10 @@ class AddressedAndClosedTests(RedirectedLedgers):
         return frames
 
     def test_a_peer_frame_at_the_address_without_a_supplied_epoch_is_not_receipted(self):
-        # Kernel dispatch supplies no heartbeat epoch to the receiving
-        # operation. The repository emitter used to read the host clock in its
-        # place; it now refuses before either ledger is opened.
-        self.publish(diagnostic("addressed-diagnostic"), ADDRESS, "addressed-diagnostic")
+        # A frame whose time is a clock reading carries no supplied epoch. The
+        # repository emitter used to read the host clock in its place; ingest
+        # now refuses the frame before either ledger is opened.
+        self.publish(diagnostic("addressed-diagnostic"), ADDRESS, "addressed-diagnostic", epoch=None)
         with self.assertRaises(ValueError) as refused:
             self.consume()
         self.assertEqual(getattr(refused.exception, "failed_predicate", None),
@@ -874,11 +878,11 @@ class ClockMarkerAndRuntimeEpochTests(CopiedRepository):
             self.assertIn(field, refusal)
         self.assertFalse((self.copy / "runtime/activations").exists())
 
-    def test_the_federation_cycle_reports_an_epoch_refusal_as_six_fields(self):
+    def test_the_federation_cycle_reports_its_own_epoch_refusal_as_six_fields(self):
         self.publish(ADDRESS, diagnostic("probe-cycle"), "probe-cycle")
-        run = subprocess.run(["python3", str(self.copy / "resident-runtime/federation_cycle.py"),
-                              "--hb-epoch", "4096"],
-                             capture_output=True, text=True, check=False, env=dict(os.environ))
+        run = subprocess.run(["python3", str(self.copy / "resident-runtime/federation_cycle.py")],
+                             capture_output=True, text=True, check=False,
+                             env={k: v for k, v in os.environ.items() if k != "HB_EPOCH"})
         self.assertEqual(run.returncode, 1, run.stderr)
         self.assertNotIn("Traceback", run.stderr)
         refusal = json.loads(run.stdout)
@@ -1058,7 +1062,8 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
         for argv, environment, failure_code in (
                 ([], {}, "HB_EPOCH_NOT_SUPPLIED"),
                 (["--hb-epoch", "+33"], {}, "HB_EPOCH_INVALID"),
-                ([], {"HB_EPOCH": "31"}, "HB_EPOCH_INVALID")):
+                ([], {"HB_EPOCH": "31"}, "HB_EPOCH_INVALID"),
+                ([], {"HB_EPOCH": ""}, "HB_EPOCH_INVALID")):
             run = subprocess.run(
                 ["python3", str(self.copy / "resident-runtime/federation_cycle.py"), *argv],
                 capture_output=True, text=True, check=False,
@@ -1177,3 +1182,130 @@ class MarkerVocabularyTests(CopiedRepository):
             self.assertIs(reference["derived_from_clock"], False)
             self.assertNotIn("sampled_unix_ns", reference)
         self.assertEqual(clock.now.call_count, 0)
+
+
+class FrameEpochReachesTheOperationTests(CopiedRepository):
+    """07:36Z rows on GCAT#15: G2 publisher epoch, G4 capability epoch, quarantined refusals."""
+
+    def unavailable_clock(self, *modules):
+        clock = mock.Mock(wraps=datetime)
+        clock.now = mock.Mock(side_effect=RuntimeError("clock unavailable"))
+        for module in modules:
+            if getattr(module, "datetime", None) is datetime:
+                patcher = mock.patch.object(module, "datetime", clock)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+        return clock
+
+    def cycle(self):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_g4", self.copy / "resident-runtime/federation_cycle.py"))
+        module.__spec__.loader.exec_module(module)
+        return module
+
+    def clock_frame(self, service, payload, packet_id):
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=service, payload=payload,
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+            packet_id=packet_id)
+        kernel.publish_packet(packet, root=self.mesh, now_ns=self.CLOCK_NS)
+
+    def ledger_receipts(self):
+        return (self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1"),
+                self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1"))
+
+    def test_a_capability_frame_at_4096_is_consumed_at_4096_without_the_clock(self):
+        self.publish(ADDRESS, diagnostic("probe-g4-ingest"), "probe-g4-ingest")
+        frame_path, = (self.mesh / "frames.d").glob("*.json")
+        clocks = [self.unavailable_clock(module) for module in _kernel_instances(ingress, capability, kernel)]
+        result = kernel.ingest_frame(ROOT, json.loads(frame_path.read_text(encoding="utf-8")),
+                                     mesh_root=self.mesh)
+        self.assertEqual(result["status"], "CONSUMED")
+        self.assertEqual(result["execution_result"]["application_result"]["receiving_operation_result"]["disposition"], "ALLOW")
+        repository, organization = self.ledger_receipts()
+        self.assertEqual((len(repository), len(organization)), (1, 1))
+        for receipt in repository + organization:
+            self.assertEqual(receipt["hb_reference"]["epoch"], 4096)
+            self.assertIs(receipt["hb_reference"]["derived_from_clock"], False)
+        self.assertEqual(sum(clock.now.call_count for clock in clocks), 0)
+
+    def test_the_cycle_carries_a_capability_frames_epoch_to_the_operation(self):
+        self.publish(ADDRESS, diagnostic("probe-g4-cycle"), "probe-g4-cycle")
+        cycle = self.cycle()
+        clock = self.unavailable_clock(cycle, cycle.K, cycle.GW)
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        self.assertFalse(clock.now.called)
+        record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+        self.assertEqual((record["frames_consumed"], record["frames_refused"]), (1, 0))
+        repository, organization = self.ledger_receipts()
+        self.assertEqual((len(repository), len(organization)), (1, 1))
+        for receipt in repository + organization:
+            self.assertEqual(receipt["hb_reference"]["epoch"], 4096)
+            self.assertIs(receipt["hb_reference"]["derived_from_clock"], False)
+
+    def test_a_refused_frame_is_quarantined_and_does_not_hold_back_the_next_cycle(self):
+        services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
+        self.publish(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "valid"}, "probe-batch-valid")
+        self.clock_frame(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "clock"}, "probe-batch-clock")
+        cycle = self.cycle()
+        clock = self.unavailable_clock(cycle, cycle.K, cycle.GW)
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+        self.assertEqual((record["frames_seen"], record["frames_consumed"], record["frames_refused"]),
+                         (2, 1, 1))
+        markers = [json.loads(path.read_text(encoding="utf-8"))
+                   for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json")]
+        quarantined, = [marker for marker in markers if marker["status"] == "REFUSED"]
+        self.assertEqual(quarantined["packet_id"], "probe-batch-clock")
+        refusal = quarantined["refusal"]
+        self.assertEqual(refusal["failure_code"], "FRAME_REFUSED_QUARANTINED")
+        self.assertEqual(refusal["refused_failure_code"], "HB_EPOCH_PROVENANCE_UNMARKED")
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, refusal)
+
+        self.publish(services["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": "next"}, "probe-batch-next")
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4097"]), 0)
+        record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+        self.assertEqual((record["frames_seen"], record["frames_consumed"], record["frames_refused"]),
+                         (1, 1, 0))
+        self.assertFalse(clock.now.called)
+        for path in [self.copy / "resident-runtime/federation/latest-cycle.json",
+                     *(self.copy / "resident-runtime/federation/seen.d").glob("*.json")]:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("sampled_unix_ns", text)
+            self.assertNotIn(str(self.CLOCK_NS), text)
+
+    def run_publisher(self, *argv):
+        return subprocess.run(
+            ["python3", str(self.copy / "resident-runtime/ecosystem_control.py"), "send-message",
+             "--subject", "probe", "--body-json", "{}", *argv],
+            capture_output=True, text=True, check=False, env=dict(os.environ))
+
+    def test_the_publisher_refuses_an_absent_or_invalid_epoch_and_publishes_nothing(self):
+        for argv, failure_code in (([], "HB_EPOCH_NOT_SUPPLIED"),
+                                   (["--hb-epoch", ""], "HB_EPOCH_INVALID"),
+                                   (["--hb-epoch", "+33"], "HB_EPOCH_INVALID"),
+                                   (["--hb-epoch", "\uff13\uff13"], "HB_EPOCH_INVALID")):
+            run = self.run_publisher(*argv)
+            self.assertEqual(run.returncode, 1, (argv, run.stderr))
+            self.assertNotIn("Traceback", run.stderr)
+            refusal = json.loads(run.stdout)
+            self.assertEqual(refusal["failure_code"], failure_code, argv)
+            for field in SuppliedEpochParsingTests.SIX_FIELDS:
+                self.assertIn(field, refusal)
+        self.assertFalse((self.mesh / "frames.d").exists())
+
+    def test_the_publisher_stamps_every_frame_from_the_supplied_epoch(self):
+        run = self.run_publisher("--hb-epoch", "4096")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        frames = [json.loads(path.read_text(encoding="utf-8"))
+                  for path in (self.mesh / "frames.d").glob("*.json")]
+        self.assertTrue(frames)
+        for frame in frames:
+            self.assertEqual(frame["heartbeat_reference"]["epoch"], 4096)
+            self.assertIs(frame["heartbeat_reference"]["derived_from_clock"], False)
+            self.assertNotIn("sampled_unix_ns", frame["heartbeat_reference"])
