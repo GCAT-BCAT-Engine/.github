@@ -86,6 +86,41 @@ def require_supplied_epoch(hb_epoch):
     return kernel.supplied_hb_reference(hb_epoch, retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
 
 
+# A repository receipt is admitted as a source only when its heartbeat
+# reference is a supplied epoch. One recorded from a clock sample, or one that
+# does not mark its provenance, is refused six-field before the store is
+# opened: no organization receipt, no retained source copy, no HEAD change.
+SOURCE_RECEIPT_IS_CLOCK_PROVENANCE = "SOURCE_RECEIPT_IS_CLOCK_PROVENANCE"
+SOURCE_PROVENANCE_PREDICATE = "SOURCE_RECEIPT_REFERENCES_A_SUPPLIED_HB_EPOCH"
+SOURCE_PROVENANCE_REPAIR = (
+    "a WU-B13 migration transition that rebinds the legacy repo receipt under a supplied epoch "
+    "with provenance CARRIED:LEGACY_CLOCK_RECEIPT + source sha; existing receipts are never mutated")
+
+
+def source_provenance_refusal(receipt):
+    """The six-field FAIL_CLOSED of a source repository receipt's provenance, or None."""
+    reference = receipt.get("hb_reference")
+    if isinstance(reference, dict) and (reference.get("derived_from_clock") is True
+                                        or "sampled_unix_ns" in reference):
+        failure = (SOURCE_RECEIPT_IS_CLOCK_PROVENANCE,
+                   "the source repository receipt's heartbeat reference is a clock reading")
+    elif not isinstance(reference, dict):
+        failure = (kernel.HB_EPOCH_PROVENANCE_UNMARKED,
+                   "the source repository receipt carries no heartbeat reference")
+    else:
+        failure = kernel.supplied_epoch_failure(reference.get("epoch"), reference)
+    if failure is None:
+        return None
+    code, detail = failure
+    return {"disposition": "FAIL_CLOSED", "failure_code": code,
+            "failed_predicate": SOURCE_PROVENANCE_PREDICATE, "detail": detail,
+            "required_evidence_or_repair": SOURCE_PROVENANCE_REPAIR,
+            "retry_entrypoint": EPOCH_RETRY_ENTRYPOINT,
+            "owning_existing_goal": kernel.HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt": "append the rebinding migration transition's receipt instead; nothing was written",
+            "consequence_committed": False}
+
+
 def require_state_digest(field, value):
     """A field named *_sha256 must carry one, or the chain records a claim it cannot check."""
     if not isinstance(value, str) or not SHA256_REF.match(value):
@@ -233,6 +268,9 @@ def verify_source(receipt):
         body.pop("receipt_sha256", None)
         if claimed != sha(body):
             raise SystemExit("repo receipt hash mismatch")
+        refusal = source_provenance_refusal(receipt)
+        if refusal is not None:
+            raise OrgLedgerEpochRefused(refusal)
         return {
             "source_receipt_schema": schema,
             "source_transition_sha256": claimed,

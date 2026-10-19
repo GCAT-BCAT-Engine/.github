@@ -172,7 +172,12 @@ def _persist_response(repo_root: Path, packet: dict[str, Any], execution_result:
     return path
 
 
-def resident_gateway_cycle(repo_root: Path) -> dict[str, Any]:
+def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> dict[str, Any]:
+    """Consume one gateway frame and submit its response.
+
+    The response frame references `hb_epoch` when the cycle supplies one, and
+    otherwise the epoch the request frame carried; never a clock reading.
+    """
     registry = K.load_registry(repo_root)
     organization = registry["organization"]
     fetched = fetch_frame(organization)
@@ -197,7 +202,8 @@ def resident_gateway_cycle(repo_root: Path) -> dict[str, Any]:
         message_class = (packet.get("payload") or {}).get("message_class")
         if message_class in {"ecosystem.monitor.request", "ecosystem.work.request", "ecosystem.communication"}:
             response = K.build_control_response(packet, execution)
-            response_frame = K.carrier_frame(response)
+            response_frame = K.carrier_frame(
+                response, epoch=hb_epoch if hb_epoch is not None else result["carried_hb_epoch"])
             submit_frame(response_frame)
             response_emitted = 1
             response_ref = response_frame["frame_sha256"]

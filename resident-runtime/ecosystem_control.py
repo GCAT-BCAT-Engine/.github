@@ -18,15 +18,21 @@ def main():
         p.add_argument("--body-json",required=True)
         p.add_argument("--requested-action")
         p.add_argument("--communication-id")
+        p.add_argument("--hb-epoch",default=None)
         p.set_defaults(message_class=cls)
     p=sub.add_parser("collect")
     p.add_argument("--communication-id",required=True)
-    sub.add_parser("status")
+    sub.add_parser("status").add_argument("--hb-epoch",default=None)
     args=ap.parse_args()
     reg=K.load_registry(ROOT)
     org=reg["organization"]
     if args.cmd=="status":
-        print(json.dumps(K.resident_status(ROOT),indent=2,sort_keys=True))
+        try:
+            status=K.resident_status(ROOT,hb_epoch=args.hb_epoch)
+        except K.SuppliedEpochRefused as exc:
+            print(json.dumps(exc.refusal,sort_keys=True))
+            raise SystemExit(1)
+        print(json.dumps(status,indent=2,sort_keys=True))
         return
     if args.cmd=="collect":
         if os.getenv("STEGVERSE_ORG_FEDERATION_GATEWAY_URL","").strip():
@@ -52,7 +58,8 @@ def main():
             subject=args.subject,
             body=body,
             requested_action=args.requested_action,
-            communication_id=args.communication_id
+            communication_id=args.communication_id,
+            epoch=args.hb_epoch
         )
     print(json.dumps({
       "status":"PUBLISHED",

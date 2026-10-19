@@ -58,6 +58,7 @@ def hb_reference(now_ns:int|None=None, *, epoch:int|None=None)->dict[str,Any]:
 # written, and no clock is read in its place.
 HB_EPOCH_NOT_SUPPLIED="HB_EPOCH_NOT_SUPPLIED"
 HB_EPOCH_INVALID="HB_EPOCH_INVALID"
+HB_EPOCH_PROVENANCE_UNMARKED="HB_EPOCH_PROVENANCE_UNMARKED"
 HB_EPOCH_PREDICATE="SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH"
 HB_EPOCH_OWNING_EXISTING_GOAL="INTERLOCK-INTR-RUNTIME-INDEPENDENT-PROTOCOL-001"
 
@@ -69,10 +70,11 @@ def supplied_epoch_failure(hb_epoch: Any, reference: Any = None) -> tuple[str, s
     must be ASCII [0-9]+ only -- an int is read as its decimal text; a bool, a
     float or anything coerced ('+33', ' 33', '3_3', '33.0') is refused -- with
     integer value >= 32 (the HB32 anchor). `reference`, the carrier frame's
-    heartbeat reference when there is one, must be an object, and a
-    `derived_from_clock` it carries must be exactly false. Any failure is
-    HB_EPOCH_INVALID. Returns (failure_code, detail), or None when the epoch is
-    supplied. No clock is read.
+    heartbeat reference when there is one, must be an object that carries
+    `derived_from_clock` exactly false and no clock sample; one with the key
+    absent or a `sampled_unix_ns` is HB_EPOCH_PROVENANCE_UNMARKED. Any other
+    failure is HB_EPOCH_INVALID. Returns (failure_code, detail), or None when
+    the epoch is supplied. No clock is read.
     """
     if reference is not None and not isinstance(reference, dict):
         return "HB_EPOCH_INVALID", "the carrier's heartbeat reference is not an object"
@@ -90,8 +92,9 @@ def supplied_epoch_failure(hb_epoch: Any, reference: Any = None) -> tuple[str, s
         return "HB_EPOCH_INVALID", "hb_epoch " + repr(hb_epoch) + " is not ASCII [0-9]+"
     if int(text) < 32:
         return "HB_EPOCH_INVALID", "hb_epoch " + text + " is below the HB32 anchor (32)"
-    if reference is not None and "derived_from_clock" in reference \
-            and reference["derived_from_clock"] is not False:
+    if reference is not None and ("derived_from_clock" not in reference or "sampled_unix_ns" in reference):
+        return "HB_EPOCH_PROVENANCE_UNMARKED", "the carrier's heartbeat reference does not mark its provenance as supplied"
+    if reference is not None and reference["derived_from_clock"] is not False:
         return "HB_EPOCH_INVALID", ("the carrier's derived_from_clock is not exactly false; "
                                     "a clock-derived epoch is not a supplied one")
     return None
@@ -108,15 +111,16 @@ class SuppliedEpochRefused(ValueError):
         self.failed_predicate=refusal["failed_predicate"]
         self.refusal=dict(refusal)
 
-def writer_epoch_refusal(hb_epoch:Any, *, retry_entrypoint:str)->dict[str,Any]|None:
+def writer_epoch_refusal(hb_epoch:Any, *, retry_entrypoint:str, reference:Any=None)->dict[str,Any]|None:
     """The six-field FAIL_CLOSED of a receipt writer's epoch, or None when it is supplied.
 
     The shape StegVerse-org/.github#189 gave the organization ledger
     (`epoch_refusal`): a receipt references the heartbeat epoch its caller
     supplies, checked by `supplied_epoch_failure`; an absent one is
-    HB_EPOCH_NOT_SUPPLIED and is never derived from a clock.
+    HB_EPOCH_NOT_SUPPLIED and is never derived from a clock. `reference` is
+    the carrier frame's heartbeat reference, when the epoch is carried by one.
     """
-    failure=supplied_epoch_failure(hb_epoch)
+    failure=supplied_epoch_failure(hb_epoch,reference)
     if failure is None:
         return None
     code,detail=failure
@@ -193,7 +197,7 @@ def capability_ingress(root:Path):
     module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
 
-def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None)->dict[str,Any]:
+def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None, hb_epoch:Any=None)->dict[str,Any]:
     registry=load_registry(root)
     if packet["destination"]["org"]!=registry["organization"]: raise ValueError("wrong_destination_org")
     service=next((s for s in registry["services"] if s["service_id"]==packet["destination"]["service"]),None)
@@ -217,7 +221,7 @@ def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None)->dict
         r=receipt(kind,packet["packet_id"],service["service_id"],prev,{"payload_hash":sha(packet["payload"])})
         receipts.append(r); prev=r["receipt_id"]
     if role=="BOUNDARY_LOCAL_CONTROL":
-        application_result=handle_control_message(root,packet,registry)
+        application_result=handle_control_message(root,packet,registry,hb_epoch=hb_epoch)
     elif role!=CAPABILITY_INGRESS_ROLE:
         application_result={"echo":packet["payload"]}
     return {"schema_version":SCHEMA,"organization":registry["organization"],"packet_id":packet["packet_id"],
@@ -235,16 +239,37 @@ def persist_outbox(root:Path, frame:dict[str,Any])->Path:
     path.write_text(json.dumps(frame,indent=2,sort_keys=True)+"\n")
     return path
 
+INGEST_EPOCH_RETRY_ENTRYPOINT="org-kernel/kernel.py::ingest_frame (the carrier frame's heartbeat_reference)"
+
+def carried_frame_epoch(frame:dict[str,Any])->int:
+    """The epoch a carrier frame carries, checked by the shared rule, or SuppliedEpochRefused.
+
+    The reference is bound to the frame by its digest. A clock-sampled, unmarked
+    or clock-flagged one is refused six-field; no clock is read in its place.
+    """
+    reference=frame.get("heartbeat_reference")
+    epoch=reference.get("epoch") if isinstance(reference,dict) else None
+    refusal=writer_epoch_refusal(epoch,retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT,
+                                 reference=reference if reference is not None else {})
+    if refusal is not None:
+        raise SuppliedEpochRefused(refusal)
+    return int(str(epoch))
+
 def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None)->dict[str,Any]:
     packet=recover_packet(frame)
     registry=load_registry(root)
     if frame["destination_org"]!=registry["organization"]:
         return {"status":"IGNORED_NOT_ADDRESSED","packet_id":frame["packet_id"]}
-    result=dispatch(root,packet,mesh_root=mesh_root)
-    return {"status":"CONSUMED","packet":packet,"execution_result":result}
+    # The frame's epoch is checked before dispatch, so a frame whose time is a
+    # clock reading is consumed by no route. It is carried, not supplied: it
+    # reaches the control status and the response frame, never a receipt writer.
+    hb_epoch=carried_frame_epoch(frame)
+    result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=hb_epoch)
+    return {"status":"CONSUMED","packet":packet,"execution_result":result,"carried_hb_epoch":hb_epoch}
 
 __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispatch","persist_outbox","ingest_frame",
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
+         "HB_EPOCH_PROVENANCE_UNMARKED","carried_frame_epoch",
          "supplied_epoch_failure","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
 
 
@@ -379,14 +404,14 @@ def publish_ecosystem_message(*, origin_org:str, origin_service:str, organizatio
                               message_class:str, subject:str, body:dict[str,Any],
                               requested_action:str|None=None, transition_reference:str="ecosystem.communication.v1",
                               authority_effect:str="NONE", communication_id:str|None=None,
-                              root:Path|None=None, now_ns:int|None=None)->dict[str,Any]:
+                              root:Path|None=None, now_ns:int|None=None, epoch:Any=None)->dict[str,Any]:
     built=build_ecosystem_packets(
       origin_org=origin_org,origin_service=origin_service,organizations=organizations,
       message_class=message_class,subject=subject,body=body,requested_action=requested_action,
       transition_reference=transition_reference,authority_effect=authority_effect,
       communication_id=communication_id
     )
-    publications=[publish_packet(packet,root=root,now_ns=now_ns) for packet in built["packets"]]
+    publications=[publish_packet(packet,root=root,now_ns=now_ns,epoch=epoch) for packet in built["packets"]]
     return {"communication_id":built["communication_id"],"organization_count":built["organization_count"],
             "published_count":len(publications),"publications":publications}
 
@@ -420,7 +445,10 @@ def load_federation_directory(root:Path)->dict[str,Any]:
         raise ValueError("federation_directory_denominator_mismatch")
     return value
 
-def resident_status(root:Path, registry:dict[str,Any]|None=None)->dict[str,Any]:
+RESIDENT_STATUS_EPOCH_RETRY_ENTRYPOINT="org-kernel/kernel.py::resident_status (hb_epoch=, carried by the request frame or supplied)"
+
+def resident_status(root:Path, registry:dict[str,Any]|None=None, *, hb_epoch:Any=None)->dict[str,Any]:
+    heartbeat=supplied_hb_reference(hb_epoch,retry_entrypoint=RESIDENT_STATUS_EPOCH_RETRY_ENTRYPOINT)
     reg=registry or load_registry(root)
     activation_path=root/"resident-runtime/activation-manifest.json"
     activation=json.loads(activation_path.read_text()) if activation_path.exists() else {}
@@ -432,7 +460,7 @@ def resident_status(root:Path, registry:dict[str,Any]|None=None)->dict[str,Any]:
       "registered_service_count":len(reg.get("services") or []),
       "registered_services":[s.get("service_id") for s in reg.get("services") or []],
       "org_control_service":organization_slug(reg["organization"])+".org-control",
-      "heartbeat_reference":hb_reference(),
+      "heartbeat_reference":heartbeat,
       "runtime_observation_claimed":False
     }
 
@@ -464,7 +492,8 @@ def persist_work_request(root:Path, packet:dict[str,Any])->dict[str,Any]:
         path.write_text(json.dumps(record,indent=2,sort_keys=True)+"\n")
     return {"state":record["state"],"intake_ref":str(path),"execution_authority_inferred":False}
 
-def handle_control_message(root:Path, packet:dict[str,Any], registry:dict[str,Any])->dict[str,Any]:
+def handle_control_message(root:Path, packet:dict[str,Any], registry:dict[str,Any], *,
+                           hb_epoch:Any=None)->dict[str,Any]:
     payload=packet.get("payload") or {}
     message_class=payload.get("message_class")
     result={
@@ -476,7 +505,7 @@ def handle_control_message(root:Path, packet:dict[str,Any], registry:dict[str,An
       "execution_authority_effect":packet["transition"]["authority_effect"]
     }
     if message_class=="ecosystem.monitor.request":
-        result["monitor_status"]=resident_status(root,registry)
+        result["monitor_status"]=resident_status(root,registry,hb_epoch=hb_epoch)
     elif message_class=="ecosystem.work.request":
         result["work_intake"]=persist_work_request(root,packet)
     elif message_class=="ecosystem.communication":
@@ -523,8 +552,17 @@ def build_control_response(request_packet:dict[str,Any], execution_result:dict[s
       packet_id=str(req_payload.get("communication_id"))+":response:"+organization_slug(local_org)
     )
 
+CONSUME_EPOCH_RETRY_ENTRYPOINT="org-kernel/kernel.py::consume_and_respond (hb_epoch=)"
+
 def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[str]|None=None,
-                        now_ns:int|None=None)->list[dict[str,Any]]:
+                        hb_epoch:Any=None)->list[dict[str,Any]]:
+    """Consume addressed frames and publish each response.
+
+    A response frame references the supplied `hb_epoch` when there is one, and
+    otherwise the epoch its request frame carried; never a clock reading.
+    """
+    if hb_epoch is not None:
+        hb_epoch=supplied_hb_reference(hb_epoch,retry_entrypoint=CONSUME_EPOCH_RETRY_ENTRYPOINT)["epoch"]
     registry=load_registry(repo_root)
     organization=registry["organization"]
     durable_seen=federation_seen_frame_names(repo_root)
@@ -539,7 +577,8 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
         if result.get("status")=="CONSUMED" and message_class in {
             "ecosystem.monitor.request","ecosystem.work.request","ecosystem.communication"}:
             response=build_control_response(packet,result["execution_result"])
-            response_publication=publish_packet(response,root=mesh_root,now_ns=now_ns)
+            epoch=hb_epoch if hb_epoch is not None else result["carried_hb_epoch"]
+            response_publication=publish_packet(response,root=mesh_root,epoch=epoch)
         marker=mark_federation_frame_seen(repo_root,item["path"],item["frame"],result)
         out.append({"path":item["path"],"result":result,"response_publication":response_publication,"seen_marker":str(marker)})
     return out
@@ -577,7 +616,7 @@ def collect_ecosystem_responses(origin_org:str, communication_id:str, *, mesh_ro
 def publish_ecosystem_from_directory(repo_root:Path, *, message_class:str, subject:str, body:dict[str,Any],
                                      requested_action:str|None=None, authority_effect:str="NONE",
                                      communication_id:str|None=None, mesh_root:Path|None=None,
-                                     now_ns:int|None=None)->dict[str,Any]:
+                                     now_ns:int|None=None, epoch:Any=None)->dict[str,Any]:
     registry=load_registry(repo_root)
     directory=load_federation_directory(repo_root)
     organizations=[row["organization"] for row in directory["organizations"]]
@@ -593,7 +632,8 @@ def publish_ecosystem_from_directory(repo_root:Path, *, message_class:str, subje
       authority_effect=authority_effect,
       communication_id=communication_id,
       root=mesh_root,
-      now_ns=now_ns
+      now_ns=now_ns,
+      epoch=epoch
     )
 
 

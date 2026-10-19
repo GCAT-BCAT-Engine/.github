@@ -82,6 +82,42 @@ EPOCH_RETRY_ENTRYPOINT = "resident-runtime/organization_egress_boundary.py::emit
 CLOSE_EPOCH_RETRY_ENTRYPOINT = "resident-runtime/organization_egress_boundary.py::close (hb_epoch=, or --hb-epoch)"
 EgressEpochRefused = kernel.SuppliedEpochRefused
 
+#: A packet id binds one emission. A replay whose frame differs (another
+#: epoch) is refused six-field before the frame is published or anything is
+#: recorded, rather than published and then refused by the ledger.
+COLLISION_FAILURE_CODE = "LEDGER_RECEIPT_COLLISION"
+COLLISION_PREDICATE = "ONE_PACKET_ID_BINDS_ONE_EMISSION"
+
+
+class EmissionCollisionRefused(ValueError):
+    """A replayed emission that is not the recorded one; nothing was published or written."""
+
+    def __init__(self, refusal: Mapping[str, Any]) -> None:
+        super().__init__(refusal["failure_code"] + ": " + refusal["detail"])
+        self.disposition = refusal["disposition"]
+        self.failed_predicate = refusal["failed_predicate"]
+        self.refusal = dict(refusal)
+
+
+def collision_refusal(transition_id: str, record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The six-field refusal when ``transition_id`` already records another emission."""
+    prior = ledger.find_repository(transition_id)
+    if prior is None:
+        return None
+    if (prior.get("predecessor_state_sha256") == record["payload_sha256"]
+            and prior.get("successor_state_sha256") == sha(dict(record))):
+        return None
+    recorded_epoch = (prior.get("hb_reference") or {}).get("epoch")
+    return {"disposition": "FAIL_CLOSED", "failure_code": COLLISION_FAILURE_CODE,
+            "failed_predicate": COLLISION_PREDICATE,
+            "detail": transition_id + " already records another emission",
+            "required_evidence_or_repair": ("replay at the epoch the packet was recorded at ("
+                                            + str(recorded_epoch) + "), or emit under a new packet id"),
+            "retry_entrypoint": EPOCH_RETRY_ENTRYPOINT,
+            "owning_existing_goal": kernel.HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt": "nothing was published or written; retry with the recorded epoch",
+            "consequence_committed": False}
+
 
 class EgressRefused(Exception):
     """A refusal carrying its own disposition, so a caller is never left guessing."""
@@ -400,7 +436,13 @@ def emit(destination_organization: Any, payload: Mapping[str, Any], *,
             destination_service=resolved["destination_service"],
             payload=dict(payload),
             transition_reference=transition_reference, authority_effect="NONE")
-        published = kernel.publish_packet(packet, root=mesh_root, epoch=hb_epoch)
+        # The frame is deterministic at a supplied epoch, so the record a
+        # publication would bind is known, and checked, before it is published.
+        frame = kernel.carrier_frame(packet, epoch=hb_epoch)
+        record = emission_record(resolved, origin, packet, frame, payload)
+        collision = collision_refusal(EMITTED_CLASS + ":" + packet["packet_id"], record)
+        if collision is None:
+            published = kernel.publish_packet(packet, root=mesh_root, epoch=hb_epoch)
     except EgressRefused as exc:
         record = emit_refusal_record(exc.failed_predicate, exc.reason,
                                      destination_organization, origin, payload)
@@ -413,6 +455,8 @@ def emit(destination_organization: Any, payload: Mapping[str, Any], *,
         appended = _record(EMIT_REFUSED_CLASS + ":" + sha(record)[7:23], EMIT_REFUSED_CLASS,
                            record["payload_sha256"], sha(record), record, hb_epoch)
         return _refusal_result(record, appended)
+    if collision is not None:
+        raise EmissionCollisionRefused(collision)
 
     record = emission_record(resolved, origin, packet, published["frame"], payload)
     appended = _record(EMITTED_CLASS + ":" + packet["packet_id"], EMITTED_CLASS,
@@ -569,7 +613,11 @@ def main() -> int:
     args = parser.parse_args()
     try:
         result = _run(args)
-    except EgressEpochRefused as exc:
+    except ValueError as exc:
+        # An epoch, provenance or collision refusal, from whichever kernel or
+        # ledger copy refused it: read by its six-field `refusal`, not its class.
+        if not isinstance(getattr(exc, "refusal", None), dict):
+            raise
         print(json.dumps(exc.refusal, sort_keys=True))
         return 1
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"

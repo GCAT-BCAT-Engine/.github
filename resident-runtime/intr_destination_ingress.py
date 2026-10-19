@@ -302,15 +302,23 @@ def main() -> int:
         print(json.dumps(exc.refusal, sort_keys=True))
         return 1
     registry = json.loads(args.registry.read_text(encoding="utf-8"))
-    if args.self_close:
-        result = self_close(args.communication_id, registry=registry,
-                            packet_id=args.packet_id, hb_epoch=hb_epoch)
-    else:
-        result = receive(
-            json.loads(args.payload.read_text(encoding="utf-8")),
-            registry=registry,
-            packet_id=args.packet_id or "organization-intr-destination",
-            hb_epoch=hb_epoch)
+    try:
+        if args.self_close:
+            result = self_close(args.communication_id, registry=registry,
+                                packet_id=args.packet_id, hb_epoch=hb_epoch)
+        else:
+            result = receive(
+                json.loads(args.payload.read_text(encoding="utf-8")),
+                registry=registry,
+                packet_id=args.packet_id or "organization-intr-destination",
+                hb_epoch=hb_epoch)
+    except ValueError as exc:
+        # A ledger writer's six-field refusal (for example a source receipt of
+        # clock provenance), from whichever kernel copy refused it.
+        if not isinstance(getattr(exc, "refusal", None), dict):
+            raise
+        print(json.dumps(exc.refusal, sort_keys=True))
+        return 1
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)
