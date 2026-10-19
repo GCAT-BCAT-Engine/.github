@@ -190,7 +190,8 @@ def _result(evidence: Mapping[str, Any], appended: Mapping[str, Any] | None, *,
 
 
 def _append(transition_class: str, packet_id: str, evidence: Mapping[str, Any],
-            hb_epoch: int | None) -> tuple[dict[str, Any], bool]:
+            hb_epoch: int | None,
+            hb_provenance: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
     """Append at both levels. A replay of the same packet returns the recorded pair."""
     predecessor = evidence["payload_sha256"]
     successor = sha({"disposition": evidence["disposition"], "packet_id": packet_id,
@@ -200,7 +201,7 @@ def _append(transition_class: str, packet_id: str, evidence: Mapping[str, Any],
     prior = ledger.find_repository(transition_id)
     repository_receipt = ledger.append_repository(
         transition_id, transition_class, predecessor, successor, dict(evidence),
-        "NONE", hb_epoch=hb_epoch,
+        "NONE", hb_epoch=hb_epoch, hb_provenance=hb_provenance,
         idempotent_on=("communication_id", "payload_sha256", "disposition"))
     # The organization receipt references the epoch this call was supplied,
     # never one read back from the repository receipt: a replay returns the
@@ -210,18 +211,19 @@ def _append(transition_class: str, packet_id: str, evidence: Mapping[str, Any],
         {"operation": OPERATION_ID, "profile_id": PROFILE_ID,
          "disposition": evidence["disposition"],
          "communication_id": evidence.get("communication_id")},
-        "NONE", hb_epoch=hb_epoch, idempotent=True)
+        "NONE", hb_epoch=hb_epoch, hb_provenance=hb_provenance, idempotent=True)
     return ({"repository_receipt": repository_receipt,
              "organization_receipt": organization_receipt}, prior is not None)
 
 
 def _recorded(disposition: str, payload: Any, packet_id: str, hb_epoch: int | None, *,
-              failed_predicate: str | None = None, detail: str | None = None) -> dict[str, Any]:
+              failed_predicate: str | None = None, detail: str | None = None,
+              hb_provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
     evidence = _evidence(payload, packet_id, disposition,
                          failed_predicate=failed_predicate, detail=detail)
     transition_class = OPERATION_ID if disposition == ALLOW else REFUSED_CLASS
     try:
-        appended, replayed = _append(transition_class, packet_id, evidence, hb_epoch)
+        appended, replayed = _append(transition_class, packet_id, evidence, hb_epoch, hb_provenance)
     except ValueError as exc:
         if str(exc) != "ledger_receipt_collision":
             raise
@@ -261,7 +263,8 @@ def self_close(communication_id: str, *, registry: Mapping[str, Any],
 
 def receive(payload: Any, *, registry: Mapping[str, Any], standing: Mapping[str, Any] | None = None,
             packet_id: str = "organization-intr-destination",
-            hb_epoch: int | None = None, mesh_root: Path | None = None) -> dict[str, Any]:
+            hb_epoch: int | None = None, mesh_root: Path | None = None,
+            hb_provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Acknowledge one diagnostic, or record the refusal.
 
     ``standing`` and ``mesh_root`` are accepted because the capability resolver
@@ -270,14 +273,14 @@ def receive(payload: Any, *, registry: Mapping[str, Any], standing: Mapping[str,
     """
     del standing, mesh_root
     if not isinstance(registry, Mapping):
-        return _recorded(DENY, payload, packet_id, hb_epoch,
+        return _recorded(DENY, payload, packet_id, hb_epoch, hb_provenance=hb_provenance,
                          failed_predicate="CAPABILITY_MAP_IS_A_MAPPING",
                          detail="registry is not an object")
     refusal = shape_refusal(payload)
     if refusal is not None:
-        return _recorded(DENY, payload, packet_id, hb_epoch,
+        return _recorded(DENY, payload, packet_id, hb_epoch, hb_provenance=hb_provenance,
                          failed_predicate=refusal[0], detail=refusal[1])
-    return _recorded(ALLOW, payload, packet_id, hb_epoch)
+    return _recorded(ALLOW, payload, packet_id, hb_epoch, hb_provenance=hb_provenance)
 
 
 def main() -> int:

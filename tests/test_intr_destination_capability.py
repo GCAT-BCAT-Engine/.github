@@ -1651,3 +1651,91 @@ class NarrowClockFlagAndEpochConflictTests(CopiedRepository):
         self.assertEqual(refused.exception.refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
         gateway.fetch_frame.assert_not_called()
         self.assertEqual(sent, [])
+
+
+class CarriedProvenanceDownstreamTests(CopiedRepository):
+    """B-P36m: a verified CARRIED claim reaches every receipt and status made in response.
+
+    Once ingest verifies a frame's claim against the current organization head,
+    the repository and organization receipts and the monitor status keep
+    `source`, `head_receipt_sha` and `derived_from_clock` false, so they read
+    as CARRIED. A writer handed a provenance re-verifies it (07:08Z) and
+    refuses CARRIED_PROVENANCE_UNVERIFIED, writing nothing.
+    """
+
+    FORGED = CarriedProvenanceTests.FORGED
+
+    def head(self):
+        received = ingress.receive(diagnostic("probe-downstream-head"), registry=REGISTRY,
+                                   packet_id="probe-downstream-head", hb_epoch=4096)
+        self.assertEqual(received["disposition"], "ALLOW", received.get("detail"))
+        return json.loads((Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]) / "HEAD.json").read_text())["receipt_sha256"]
+
+    def claimed(self, service, payload, packet_id, head):
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=service, payload=payload,
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
+            packet_id=packet_id)
+        return _forged_frame(kernel.carrier_frame(packet, epoch=4096),
+                             source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=head)
+
+    def assert_carried(self, reference, head):
+        self.assertEqual(reference["epoch"], 4096)
+        self.assertIs(reference["derived_from_clock"], False)
+        self.assertEqual(reference["source"], "ORGANIZATION_LEDGER_HEAD")
+        self.assertEqual(reference["head_receipt_sha"], head)
+        self.assertNotIn("sampled_unix_ns", reference)
+
+    def test_receipts_made_for_a_verified_carried_frame_read_as_carried(self):
+        head = self.head()
+        frame = self.claimed(ADDRESS, diagnostic("probe-downstream-capability"),
+                             "probe-downstream-capability", head)
+        result = kernel.ingest_frame(self.copy, frame, mesh_root=self.mesh)
+        self.assertEqual(result["status"], "CONSUMED")
+        operation = result["execution_result"]["application_result"]["receiving_operation_result"]
+        repository_sha = operation["repository_receipt_sha256"]
+        organization_sha = operation["organization_receipt_sha256"]
+        repository, = [receipt for receipt in self.receipts(
+            "STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+            if receipt["receipt_sha256"] == repository_sha]
+        organization, = [receipt for receipt in self.receipts(
+            "STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1")
+            if receipt["receipt_sha256"] == organization_sha]
+        self.assert_carried(repository["hb_reference"], head)
+        self.assert_carried(organization["hb_reference"], head)
+
+    def test_the_monitor_status_for_a_verified_carried_frame_reads_as_carried(self):
+        head = self.head()
+        control = next(row["service_id"] for row in REGISTRY["services"]
+                       if row["boundary_role"] == "BOUNDARY_LOCAL_CONTROL")
+        frame = self.claimed(control, {"communication_id": "probe-downstream-monitor",
+                                       "message_class": "ecosystem.monitor.request",
+                                       "subject": "probe", "body": {}},
+                             "probe-downstream-monitor", head)
+        result = kernel.ingest_frame(self.copy, frame, mesh_root=self.mesh)
+        self.assert_carried(result["execution_result"]["application_result"]["monitor_status"]
+                            ["heartbeat_reference"], head)
+
+    def test_a_writer_handed_an_unverified_provenance_refuses_and_writes_nothing(self):
+        self.head()
+        before = sorted(str(path) for name in self.LEDGER_ROOTS
+                        for path in Path(os.environ[name]).rglob("*") if path.is_file())
+        emit = ingress.ledger.emit
+        forged = {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": self.FORGED}
+        with self.assertRaises(ValueError) as refused:
+            emit.append("probe:forged", "PROBE", kernel.sha({"p": 1}), kernel.sha({"p": 2}), {},
+                        "NONE", hb_epoch=4096, hb_provenance=forged)
+        self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        repository, = [receipt for receipt in self.receipts(
+            "STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")]
+        with self.assertRaises(ValueError) as refused:
+            ingress.ledger.aggregate.append(repository, "REPO_STATE_PROPAGATION", "FROM_HEAD",
+                                            kernel.sha({"p": 3}), {}, "NONE", hb_epoch=4096,
+                                            hb_provenance=forged)
+        self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, refused.exception.refusal)
+        after = sorted(str(path) for name in self.LEDGER_ROOTS
+                       for path in Path(os.environ[name]).rglob("*") if path.is_file())
+        self.assertEqual(after, before)

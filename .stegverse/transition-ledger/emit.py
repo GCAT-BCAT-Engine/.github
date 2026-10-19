@@ -78,7 +78,7 @@ _ABSENT=object()
 # HB_EPOCH_INVALID, and no clock is read.
 EPOCH_RETRY_ENTRYPOINT=".stegverse/transition-ledger/emit.py::append (hb_epoch=, or --hb-epoch)"
 RepoLedgerEpochRefused=kernel.SuppliedEpochRefused
-def append(transition_id,transition_class,predecessor_state_sha256,successor_state_sha256,evidence=None,authority_effect="NONE",hb_epoch=None,store=None,idempotent_on=None):
+def append(transition_id,transition_class,predecessor_state_sha256,successor_state_sha256,evidence=None,authority_effect="NONE",hb_epoch=None,store=None,idempotent_on=None,hb_provenance=None):
  """Append one repository transition receipt through the substrate transaction.
 
  With `idempotent_on` (a tuple of evidence keys, possibly empty) a transition
@@ -98,9 +98,12 @@ def append(transition_id,transition_class,predecessor_state_sha256,successor_sta
 
  An attempt whose `hb_epoch` is absent or invalid raises
  `RepoLedgerEpochRefused` before the store is opened; the heartbeat reference
- is never read from the host clock.
+ is never read from the host clock. `hb_provenance`, a CARRIED claim's
+ `source` and `head_receipt_sha`, is verified against the current
+ organization ledger head and kept on the reference, or refused
+ CARRIED_PROVENANCE_UNVERIFIED before the store is opened.
  """
- hb_ref=kernel.supplied_hb_reference(hb_epoch,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+ hb_ref=kernel.supplied_hb_reference(hb_epoch,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT,provenance=hb_provenance)
  target=store or ledger_store.open_store(lr());target.initialize()
  for _attempt in range(128):
   expected_head=target.get(ledger_store.HEAD_KEY)

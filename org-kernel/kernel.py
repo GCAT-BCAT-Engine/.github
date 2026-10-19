@@ -26,22 +26,28 @@ def sha(v:Any)->str:
     raw=v if isinstance(v,(bytes,bytearray)) else canon(v)
     return "sha256:"+hashlib.sha256(bytes(raw)).hexdigest()
 
-def hb_reference(now_ns:int|None=None, *, epoch:int|None=None)->dict[str,Any]:
+def hb_reference(now_ns:int|None=None, *, epoch:int|None=None,
+                 provenance:dict[str,Any]|None=None)->dict[str,Any]:
     """Heartbeat reference. Time is a constraint variable.
 
     A supplied epoch is a count of heartbeat periods from the HB32 anchor, and
     the reference then omits the clock sample. A clock sample keeps the fields
-    this kernel already returned for a carrier frame.
+    this kernel already returned for a carrier frame. `provenance`, a verified
+    CARRIED claim's `source` and `head_receipt_sha`, is kept on the reference so
+    it reads as CARRIED rather than SUPPLIED.
     """
     if epoch is not None:
         if now_ns is not None:
             raise ValueError("supply_epoch_or_sample_not_both")
         if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < HB_ANCHOR_EPOCH:
             raise ValueError("epoch_precedes_hb32_anchor")
-        return {"epoch": epoch, "generation": epoch, "heartbeat_id": f"HB:{epoch}",
-                "phase_offset_ns": 0, "frequency_hz": HB_HZ,
-                "progression_dependency": "OSCILLATOR_ONLY",
-                "derived_from_clock": False, "authority_effect": "NONE"}
+        reference = {"epoch": epoch, "generation": epoch, "heartbeat_id": f"HB:{epoch}",
+                     "phase_offset_ns": 0, "frequency_hz": HB_HZ,
+                     "progression_dependency": "OSCILLATOR_ONLY",
+                     "derived_from_clock": False, "authority_effect": "NONE"}
+        if provenance:
+            reference.update({key: provenance[key] for key in ("source", "head_receipt_sha")})
+        return reference
     if now_ns is None:
         now_ns=int(datetime.now(timezone.utc).timestamp()*1_000_000_000)
     if now_ns<HB_ANCHOR_UNIX_NS:
@@ -137,12 +143,25 @@ def writer_epoch_refusal(hb_epoch:Any, *, retry_entrypoint:str, reference:Any=No
             "next_attempt":"call again with the supplied epoch; nothing was written",
             "derived_from_clock":False,"consequence_committed":False}
 
-def supplied_hb_reference(hb_epoch:Any, *, retry_entrypoint:str)->dict[str,Any]:
-    """The heartbeat reference of a supplied epoch, or SuppliedEpochRefused. No clock is read."""
+def supplied_hb_reference(hb_epoch:Any, *, retry_entrypoint:str, provenance:dict[str,Any]|None=None)->dict[str,Any]:
+    """The heartbeat reference of a supplied epoch, or SuppliedEpochRefused. No clock is read.
+
+    With `provenance` (a CARRIED claim's `source` and `head_receipt_sha`) the
+    claim is verified against the current organization ledger head here, by
+    the writer itself, and kept on the reference; one that does not verify is
+    CARRIED_PROVENANCE_UNVERIFIED.
+    """
     refusal=writer_epoch_refusal(hb_epoch,retry_entrypoint=retry_entrypoint)
     if refusal is not None:
         raise SuppliedEpochRefused(refusal)
-    return hb_reference(epoch=int(str(hb_epoch)))
+    epoch=int(str(hb_epoch))
+    if provenance is not None:
+        claim={"epoch":epoch,"derived_from_clock":False,
+               **{key:provenance.get(key) for key in CARRIED_PROVENANCE_FIELDS}}
+        unverified=carried_provenance_failure(claim)
+        if unverified is not None:
+            raise SuppliedEpochRefused(carried_provenance_refusal(unverified,retry_entrypoint))
+    return hb_reference(epoch=epoch,provenance=provenance)
 
 def derive_channel(payload_hash:str)->dict[str,Any]:
     if not isinstance(payload_hash,str) or not payload_hash.startswith("sha256:") or len(payload_hash)!=71:
@@ -201,7 +220,8 @@ def capability_ingress(root:Path):
     module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
 
-def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None, hb_epoch:Any=None)->dict[str,Any]:
+def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None, hb_epoch:Any=None,
+             hb_provenance:dict[str,Any]|None=None)->dict[str,Any]:
     registry=load_registry(root)
     if packet["destination"]["org"]!=registry["organization"]: raise ValueError("wrong_destination_org")
     service=next((s for s in registry["services"] if s["service_id"]==packet["destination"]["service"]),None)
@@ -216,7 +236,8 @@ def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None, hb_ep
     if role==CAPABILITY_INGRESS_ROLE:
         try:
             application_result=capability_ingress(root).receive(
-                root,service,packet,registry=registry,mesh_root=mesh_root,hb_epoch=hb_epoch)
+                root,service,packet,registry=registry,mesh_root=mesh_root,hb_epoch=hb_epoch,
+                hb_provenance=hb_provenance)
         except SystemExit as refused:
             raise ValueError("capability_ingress_refused:"+str(refused)) from None
         extra["processing_selection"]=NO_PROCESSOR_SELECTED
@@ -225,7 +246,8 @@ def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None, hb_ep
         r=receipt(kind,packet["packet_id"],service["service_id"],prev,{"payload_hash":sha(packet["payload"])})
         receipts.append(r); prev=r["receipt_id"]
     if role=="BOUNDARY_LOCAL_CONTROL":
-        application_result=handle_control_message(root,packet,registry,hb_epoch=hb_epoch)
+        application_result=handle_control_message(root,packet,registry,hb_epoch=hb_epoch,
+                                                  hb_provenance=hb_provenance)
     elif role!=CAPABILITY_INGRESS_ROLE:
         application_result={"echo":packet["payload"]}
     return {"schema_version":SCHEMA,"organization":registry["organization"],"packet_id":packet["packet_id"],
@@ -254,6 +276,18 @@ def _ledger_store():
     spec=importlib.util.spec_from_file_location("ledger_store_for_kernel",path)
     module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     return module
+
+def carried_provenance_refusal(detail:str, retry_entrypoint:str)->dict[str,Any]:
+    """The six-field FAIL_CLOSED of a CARRIED claim that does not verify."""
+    return {"disposition":"FAIL_CLOSED","failure_code":CARRIED_PROVENANCE_UNVERIFIED,
+            "failed_predicate":CARRIED_PROVENANCE_PREDICATE,"detail":detail,
+            "required_evidence_or_repair":("a carried epoch names source "+CARRIED_PROVENANCE_SOURCE
+                                           +" and head_receipt_sha of the current verified organization "
+                                           "ledger head; it is never stripped and accepted as supplied"),
+            "retry_entrypoint":retry_entrypoint,
+            "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt":"re-emit with a verifiable claim or a supplied epoch; nothing was written",
+            "derived_from_clock":False,"consequence_committed":False}
 
 def carried_provenance_failure(reference:dict[str,Any])->str|None:
     """Why a carrier's CARRIED claim does not verify, or None when it makes none or verifies.
@@ -315,17 +349,20 @@ def carried_frame_epoch(frame:dict[str,Any])->int|None:
         raise SuppliedEpochRefused(refusal)
     unverified=carried_provenance_failure(reference)
     if unverified is not None:
-        raise SuppliedEpochRefused({
-            "disposition":"FAIL_CLOSED","failure_code":CARRIED_PROVENANCE_UNVERIFIED,
-            "failed_predicate":CARRIED_PROVENANCE_PREDICATE,"detail":unverified,
-            "required_evidence_or_repair":("a carried epoch names source "+CARRIED_PROVENANCE_SOURCE
-                                           +" and head_receipt_sha of the current verified organization "
-                                           "ledger head; it is never stripped and accepted as supplied"),
-            "retry_entrypoint":INGEST_EPOCH_RETRY_ENTRYPOINT,
-            "owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
-            "next_attempt":"re-emit the frame with a verifiable claim or a supplied epoch; nothing was written",
-            "derived_from_clock":False,"consequence_committed":False})
+        raise SuppliedEpochRefused(carried_provenance_refusal(unverified,INGEST_EPOCH_RETRY_ENTRYPOINT))
     return int(str(epoch))
+
+def frame_provenance(frame:dict[str,Any])->dict[str,Any]|None:
+    """The CARRIED claim a frame makes (`source`, `head_receipt_sha`), or None.
+
+    Read only after `carried_frame_epoch` has verified it; it is handed on to
+    every writer so a receipt made in response reads as CARRIED, never stripped
+    to SUPPLIED.
+    """
+    reference=frame.get("heartbeat_reference")
+    if not isinstance(reference,dict) or not any(field in reference for field in CARRIED_PROVENANCE_FIELDS):
+        return None
+    return {field:reference.get(field) for field in CARRIED_PROVENANCE_FIELDS}
 
 def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
                  hb_epoch:Any=None)->dict[str,Any]:
@@ -357,13 +394,15 @@ def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
             "next_attempt":"nothing was written; retry with one epoch",
             "derived_from_clock":False,"consequence_committed":False})
     epoch=explicit if explicit is not None else carried
-    result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=epoch)
+    provenance=frame_provenance(frame) if carried is not None else None
+    result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=epoch,hb_provenance=provenance)
     return {"status":"CONSUMED","packet":packet,"execution_result":result,
-            "carried_hb_epoch":carried,"hb_epoch":epoch}
+            "carried_hb_epoch":carried,"hb_epoch":epoch,"carried_provenance":provenance}
 
 __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispatch","persist_outbox","ingest_frame",
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
          "HB_EPOCH_PROVENANCE_UNMARKED","HB_EPOCH_CONFLICT","carried_frame_epoch","carried_provenance_failure",
+         "carried_provenance_refusal","frame_provenance",
          "CARRIED_PROVENANCE_UNVERIFIED",
          "supplied_epoch_failure","SHARED_VALIDATOR_SHA256","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
 
@@ -542,8 +581,10 @@ def load_federation_directory(root:Path)->dict[str,Any]:
 
 RESIDENT_STATUS_EPOCH_RETRY_ENTRYPOINT="org-kernel/kernel.py::resident_status (hb_epoch=, carried by the request frame or supplied)"
 
-def resident_status(root:Path, registry:dict[str,Any]|None=None, *, hb_epoch:Any=None)->dict[str,Any]:
-    heartbeat=supplied_hb_reference(hb_epoch,retry_entrypoint=RESIDENT_STATUS_EPOCH_RETRY_ENTRYPOINT)
+def resident_status(root:Path, registry:dict[str,Any]|None=None, *, hb_epoch:Any=None,
+                    hb_provenance:dict[str,Any]|None=None)->dict[str,Any]:
+    heartbeat=supplied_hb_reference(hb_epoch,retry_entrypoint=RESIDENT_STATUS_EPOCH_RETRY_ENTRYPOINT,
+                                    provenance=hb_provenance)
     reg=registry or load_registry(root)
     activation_path=root/"resident-runtime/activation-manifest.json"
     activation=json.loads(activation_path.read_text()) if activation_path.exists() else {}
@@ -588,7 +629,7 @@ def persist_work_request(root:Path, packet:dict[str,Any])->dict[str,Any]:
     return {"state":record["state"],"intake_ref":str(path),"execution_authority_inferred":False}
 
 def handle_control_message(root:Path, packet:dict[str,Any], registry:dict[str,Any], *,
-                           hb_epoch:Any=None)->dict[str,Any]:
+                           hb_epoch:Any=None, hb_provenance:dict[str,Any]|None=None)->dict[str,Any]:
     payload=packet.get("payload") or {}
     message_class=payload.get("message_class")
     result={
@@ -600,7 +641,7 @@ def handle_control_message(root:Path, packet:dict[str,Any], registry:dict[str,An
       "execution_authority_effect":packet["transition"]["authority_effect"]
     }
     if message_class=="ecosystem.monitor.request":
-        result["monitor_status"]=resident_status(root,registry,hb_epoch=hb_epoch)
+        result["monitor_status"]=resident_status(root,registry,hb_epoch=hb_epoch,hb_provenance=hb_provenance)
     elif message_class=="ecosystem.work.request":
         result["work_intake"]=persist_work_request(root,packet)
     elif message_class=="ecosystem.communication":
