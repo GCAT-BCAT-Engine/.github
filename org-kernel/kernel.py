@@ -336,7 +336,9 @@ def carried_frame_epoch(frame:dict[str,Any])->int|None:
     (`derived_from_clock` exactly true), or the legacy bare sample (no flag,
     `sampled_unix_ns` present) -- lends no epoch and returns None: the frame is
     consumed, and a route that needs an epoch refuses NOT_SUPPLIED (NARROW S1,
-    pending WU-B13). Otherwise the shared rule decides: an unmarked reference
+    pending WU-B13). Its epoch field must still be well formed: a missing one is
+    NOT_SUPPLIED and a malformed one INVALID, six-field, and a cycle
+    quarantines the frame. Otherwise the shared rule decides: an unmarked reference
     (no flag, no sample) is refused six-field, as is one that claims SUPPLIED
     while carrying a sample, and a CARRIED claim that does not verify against
     the organization ledger head. No clock is read.
@@ -345,6 +347,9 @@ def carried_frame_epoch(frame:dict[str,Any])->int|None:
     if isinstance(reference,dict) and (reference.get("derived_from_clock") is True
                                        or ("derived_from_clock" not in reference
                                            and "sampled_unix_ns" in reference)):
+        malformed=writer_epoch_refusal(reference.get("epoch"),retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT)
+        if malformed is not None:
+            raise SuppliedEpochRefused(malformed)
         return None
     epoch=reference.get("epoch") if isinstance(reference,dict) else None
     refusal=writer_epoch_refusal(epoch,retry_entrypoint=INGEST_EPOCH_RETRY_ENTRYPOINT,

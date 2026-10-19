@@ -26,5 +26,22 @@
   "local_spool_scope": "SAME_HOST_FALLBACK_ONLY",
   "resident_cycle_entrypoint": "resident-runtime/federation_cycle.py",
   "federation_poll_mode": "OUTBOUND_ONLY",
-  "federation_network_route": "SHARED_SERVICE_GATEWAY"
+  "federation_network_route": "SHARED_SERVICE_GATEWAY",
+  "epoch_bindings": {
+    "resident-runtime/federation_cycle.py": {
+      "hb_epoch": {"from": "dispatch_input", "argument": "--hb-epoch", "environment": "HB_EPOCH"},
+      "dispatcher": "the resident host that runs resident_cycle_entrypoint passes its dispatch input as --hb-epoch or HB_EPOCH",
+      "absent_or_invalid": "SIX_FIELD_FAIL_CLOSED_NOTHING_WRITTEN",
+      "never_derived_from_clock": true
+    },
+    "resident-runtime/ecosystem_control.py": {
+      "hb_epoch": {"from": "dispatch_input", "argument": "--hb-epoch"},
+      "dispatcher": "the operator or resident host that runs ecosystem_control passes its dispatch input as --hb-epoch",
+      "absent_or_invalid": "SIX_FIELD_FAIL_CLOSED_NOTHING_PUBLISHED",
+      "never_derived_from_clock": true
+    }
+  },
+  "epoch_free_entrypoints": {
+    "resident-runtime/run_once.py": "frame-only boundary run (build_egress); takes no epoch, SCOPED_TO_WU_B13"
+  }
 }

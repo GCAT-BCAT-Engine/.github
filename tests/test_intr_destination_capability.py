@@ -1779,3 +1779,104 @@ class CarriedProvenanceDownstreamTests(CopiedRepository):
         after = sorted(str(path) for name in self.LEDGER_ROOTS
                        for path in Path(os.environ[name]).rglob("*") if path.is_file())
         self.assertEqual(after, before)
+
+
+class ManifestEpochBindingTests(unittest.TestCase):
+    """B-P36n: every epoch-requiring entrypoint the activation manifest names declares a binding."""
+
+    MANIFEST = ROOT / "resident-runtime/activation-manifest.json"
+    SOURCES = {"dispatch_input", "CARRIED:ORGANIZATION_LEDGER_HEAD"}
+
+    def declared(self):
+        manifest = json.loads(self.MANIFEST.read_text(encoding="utf-8"))
+        paths = {value for value in manifest.values()
+                 if isinstance(value, str) and value.endswith(".py") and (ROOT / value).is_file()}
+        return manifest, paths
+
+    @staticmethod
+    def requires_epoch(path):
+        return '"--hb-epoch"' in (ROOT / path).read_text(encoding="utf-8")
+
+    def test_every_epoch_requiring_entrypoint_has_a_binding(self):
+        manifest, paths = self.declared()
+        bindings = manifest.get("epoch_bindings", {})
+        requiring = {path for path in paths if self.requires_epoch(path)}
+        self.assertTrue({"resident-runtime/federation_cycle.py",
+                         "resident-runtime/ecosystem_control.py"} <= requiring)
+        self.assertEqual(manifest["resident_cycle_entrypoint"], "resident-runtime/federation_cycle.py")
+        for path in requiring:
+            self.assertIn(path, bindings, path + " requires an epoch and declares no binding")
+            binding = bindings[path]["hb_epoch"]
+            self.assertIn(binding["from"], self.SOURCES)
+            source = (ROOT / path).read_text(encoding="utf-8")
+            self.assertIn('"' + binding["argument"] + '"', source)
+            if "environment" in binding:
+                self.assertIn('"' + binding["environment"] + '"', source)
+            self.assertIs(bindings[path]["never_derived_from_clock"], True)
+
+    def test_a_binding_or_an_exemption_names_only_declared_entrypoints(self):
+        manifest, paths = self.declared()
+        for path in manifest.get("epoch_bindings", {}):
+            self.assertIn(path, paths)
+            self.assertTrue(self.requires_epoch(path))
+        for path in manifest.get("epoch_free_entrypoints", {}):
+            self.assertIn(path, paths)
+            self.assertFalse(self.requires_epoch(path), path)
+
+
+class MalformedClockFrameTests(CopiedRepository):
+    """F-S1a: a CLOCK frame's epoch field must be well formed; otherwise six fields and quarantine."""
+
+    def clock_frame(self, packet_id, **reference):
+        packet = kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS,
+            destination_service=next(row["service_id"] for row in REGISTRY["services"]
+                                     if row["boundary_role"] == "BOUNDARY_LOCAL_DIAGNOSTIC"),
+            payload={"probe": packet_id}, transition_reference="intr:transition:" + packet_id,
+            authority_effect="NONE", packet_id=packet_id)
+        frame = kernel.carrier_frame(packet, epoch=4096)
+        body = dict(frame)
+        body.pop("frame_sha256")
+        body["heartbeat_reference"] = {"derived_from_clock": True, **reference}
+        return {**body, "frame_sha256": kernel.sha(body)}
+
+    CASES = (({"epoch": "abc"}, "HB_EPOCH_INVALID"),
+             ({}, "HB_EPOCH_NOT_SUPPLIED"),
+             ({"epoch": 5}, "HB_EPOCH_INVALID"),
+             ({"sampled_unix_ns": 1}, "HB_EPOCH_NOT_SUPPLIED"))
+
+    def test_a_malformed_clock_epoch_is_refused_six_field(self):
+        for index, (reference, failure_code) in enumerate(self.CASES):
+            with self.assertRaises(kernel.SuppliedEpochRefused) as refused:
+                kernel.ingest_frame(self.copy, self.clock_frame("probe-malformed-" + str(index), **reference),
+                                    mesh_root=self.mesh)
+            for field in SuppliedEpochParsingTests.SIX_FIELDS:
+                self.assertIn(field, refused.exception.refusal)
+            self.assertEqual(refused.exception.refusal["failure_code"], failure_code, reference)
+        # The legacy bare sample with a malformed epoch is CLOCK too, and refused the same way.
+        legacy = self.clock_frame("probe-malformed-legacy")
+        body = dict(legacy)
+        body.pop("frame_sha256")
+        body["heartbeat_reference"] = {"epoch": "abc", "sampled_unix_ns": 1}
+        with self.assertRaises(kernel.SuppliedEpochRefused) as refused:
+            kernel.ingest_frame(self.copy, {**body, "frame_sha256": kernel.sha(body)}, mesh_root=self.mesh)
+        self.assertEqual(refused.exception.refusal["failure_code"], "HB_EPOCH_INVALID")
+
+    def test_a_cycle_quarantines_malformed_clock_frames_and_does_not_raise(self):
+        for index, (reference, _failure_code) in enumerate(self.CASES):
+            kernel.publish_frame(self.clock_frame("probe-cycle-malformed-" + str(index), **reference),
+                                 root=self.mesh)
+        cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_malformed", self.copy / "resident-runtime/federation_cycle.py"))
+        cycle.__spec__.loader.exec_module(cycle)
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        markers = {json.loads(path.read_text(encoding="utf-8"))["packet_id"]:
+                   json.loads(path.read_text(encoding="utf-8"))
+                   for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json")}
+        for index, (_reference, failure_code) in enumerate(self.CASES):
+            marker = markers["probe-cycle-malformed-" + str(index)]
+            self.assertEqual(marker["status"], "REFUSED")
+            self.assertEqual(marker["refusal"]["failure_code"], "FRAME_REFUSED_QUARANTINED")
+            self.assertEqual(marker["refusal"]["refused_failure_code"], failure_code)
