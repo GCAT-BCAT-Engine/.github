@@ -1,0 +1,86 @@
+name: Organization Ledger Transition Validation
+
+# PR-facing (and, where it already ran there, push-to-main) checks of
+# .github/workflows/organization-ledger-transition.yml, split from that writer so every
+# job here runs on every trigger: none is conditional and none holds contents: write.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.stegverse/transition-ledger/**'
+      - 'resident-runtime/ledger_store.py'
+      - 'resident-runtime/aggregate_repo_transition.py'
+      - 'resident-runtime/organization_ledger_readback.py'
+      - 'resident-runtime/dual_ledger.py'
+      - 'resident-runtime/intr_destination_ingress.py'
+      - 'org-kernel/kernel.py'
+      - 'data/organization-role-runtime-reality-deployment.json'
+      - 'tests/test_organization_ledger_stack.py'
+      - 'tests/test_intr_destination_capability.py'
+      - 'docs/ORGANIZATION_TRANSITION_LEDGER_MIRROR_HANDOFF.md'
+      - 'docs/TRANSITION_LEDGER_MIRROR_HANDOFF.md'
+      - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
+      - '.github/workflows/organization-ledger-transition.yml'
+      - '.github/workflows/organization-ledger-transition-validation.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.stegverse/transition-ledger/**'
+      - 'resident-runtime/ledger_store.py'
+      - 'resident-runtime/aggregate_repo_transition.py'
+      - 'resident-runtime/organization_ledger_readback.py'
+      - 'resident-runtime/dual_ledger.py'
+      - 'resident-runtime/intr_destination_ingress.py'
+      - 'org-kernel/kernel.py'
+      - 'data/organization-role-runtime-reality-deployment.json'
+      - 'tests/test_organization_ledger_stack.py'
+      - 'tests/test_intr_destination_capability.py'
+      - 'docs/ORGANIZATION_TRANSITION_LEDGER_MIRROR_HANDOFF.md'
+      - 'docs/TRANSITION_LEDGER_MIRROR_HANDOFF.md'
+      - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
+      - '.github/workflows/organization-ledger-transition.yml'
+      - '.github/workflows/organization-ledger-transition-validation.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout organization boundary
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The contract names the published ref
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          org = json.loads(Path(".stegverse/transition-ledger/org-contract.json").read_text())
+          repo = json.loads(Path(".stegverse/transition-ledger/contract.json").read_text())
+          assert org["organization_ledger_ref"] == "refs/stegverse/organization-ledger"
+          assert org["organization_ledger_repository"] == "GCAT-BCAT-Engine/.github"
+          assert "ORGANIZATION_LEDGER_ROOT" not in Path(".stegverse/transition-ledger/org-contract.json").read_text()
+          location = repo["repository_ledger_location"]
+          assert location["ref"] == org["organization_ledger_ref"]
+          assert location["repository"] == org["organization_ledger_repository"]
+          assert location["namespace"] == "repository-ledger/GCAT-BCAT-Engine/.github"
+          assert location["new_ledger_root"] is False
+          deployment = json.loads(Path("data/organization-role-runtime-reality-deployment.json").read_text())
+          assert deployment["reality_locus"] == org["organization_ledger_ref"]
+          print("ORGANIZATION_LEDGER_REF_BOUND=PASS")
+          PY
+
+      # Redirected roots only. This job does not fetch or push
+      # refs/stegverse/organization-ledger.
+      - name: Validate the ledger stack and the intr-destination capability
+        env:
+          STEGVERSE_REPO_LEDGER_ROOT: ${{ runner.temp }}/repo-ledger
+          STEGVERSE_ORG_LEDGER_ROOT: ${{ runner.temp }}/org-ledger
+        run: |
+          python -m unittest tests.test_organization_ledger_stack tests.test_intr_destination_capability -v
+          python org-kernel/tests/test_kernel.py
+          python org-runtime/runtime_boundary.py validate > boundary.json
+          python -c 'import json; report=json.load(open("boundary.json")); assert report["valid"] is True, report'
