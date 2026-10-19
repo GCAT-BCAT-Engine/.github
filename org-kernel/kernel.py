@@ -70,11 +70,10 @@ def supplied_epoch_failure(hb_epoch: Any, reference: Any = None) -> tuple[str, s
     must be ASCII [0-9]+ only -- an int is read as its decimal text; a bool, a
     float or anything coerced ('+33', ' 33', '3_3', '33.0') is refused -- with
     integer value >= 32 (the HB32 anchor). `reference`, the carrier frame's
-    heartbeat reference when there is one, must be an object. In order: a
-    `derived_from_clock` present and not exactly false is HB_EPOCH_INVALID, a
-    `sampled_unix_ns` is HB_EPOCH_INVALID, and `derived_from_clock` absent is
-    HB_EPOCH_PROVENANCE_UNMARKED. Returns (failure_code, detail), or None when
-    the epoch is supplied. No clock is read.
+    heartbeat reference when there is one, must be an object, and a
+    `derived_from_clock` it carries must be exactly false. Any failure is
+    HB_EPOCH_INVALID. Returns (failure_code, detail), or None when the epoch is
+    supplied. No clock is read.
     """
     if reference is not None and not isinstance(reference, dict):
         return "HB_EPOCH_INVALID", "the carrier's heartbeat reference is not an object"
@@ -96,11 +95,13 @@ def supplied_epoch_failure(hb_epoch: Any, reference: Any = None) -> tuple[str, s
             and reference["derived_from_clock"] is not False:
         return "HB_EPOCH_INVALID", ("the carrier's derived_from_clock is not exactly false; "
                                     "a clock-derived epoch is not a supplied one")
-    if reference is not None and "sampled_unix_ns" in reference:
-        return "HB_EPOCH_INVALID", "the carrier's heartbeat reference carries a clock sample; it is not a supplied epoch"
-    if reference is not None and "derived_from_clock" not in reference:
-        return "HB_EPOCH_PROVENANCE_UNMARKED", "the carrier's heartbeat reference does not mark its provenance as supplied"
+    if reference is not None and "sampled_unix_ns" in reference: return "HB_EPOCH_INVALID", "the carrier's heartbeat reference carries sampled_unix_ns; a sampled clock value is CLOCK, never a supplied epoch"
+    if reference is not None and "derived_from_clock" not in reference: return "HB_EPOCH_PROVENANCE_UNMARKED", "the carrier's heartbeat reference carries no derived_from_clock; an unmarked clock value is laundering, and a carrier cannot self-assert CARRIED provenance"
     return None
+
+# sha256 of inspect.getsource(supplied_epoch_failure), the #3282 FINAL text
+# (StegVerse-Labs/.github#3282 @e1b3ac8). Every copy of the rule pins it.
+SHARED_VALIDATOR_SHA256="ad8ff52936d5bcd9a2ad6caceb2d9a637a099518989b34bbb3370301c7a4cce2"
 
 class SuppliedEpochRefused(ValueError):
     """A receipt writer's refusal of an absent or invalid supplied epoch.
@@ -336,7 +337,7 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "capability_ingress","CAPABILITY_INGRESS_ROLE","HB_EPOCH_NOT_SUPPLIED","HB_EPOCH_INVALID",
          "HB_EPOCH_PROVENANCE_UNMARKED","carried_frame_epoch","carried_provenance_failure",
          "CARRIED_PROVENANCE_UNVERIFIED",
-         "supplied_epoch_failure","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
+         "supplied_epoch_failure","SHARED_VALIDATOR_SHA256","SuppliedEpochRefused","writer_epoch_refusal","supplied_hb_reference"]
 
 
 # --- Federation mesh v1.1 additions ---

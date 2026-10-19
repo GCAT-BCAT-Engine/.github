@@ -13,7 +13,9 @@ an authentic production receipt or a live peer installation.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import inspect
 import json
 import os
 import shutil
@@ -1284,7 +1286,8 @@ class FrameEpochReachesTheOperationTests(CopiedRepository):
         for path in [self.copy / "resident-runtime/federation/latest-cycle.json",
                      *(self.copy / "resident-runtime/federation/seen.d").glob("*.json")]:
             text = path.read_text(encoding="utf-8")
-            self.assertNotIn("sampled_unix_ns", text)
+            # No clock sample is written as a value; the refusal's detail may name the field.
+            self.assertNotIn('"sampled_unix_ns":', text)
             self.assertNotIn(str(self.CLOCK_NS), text)
 
     def run_publisher(self, *argv):
@@ -1440,3 +1443,30 @@ class CarriedProvenanceTests(CopiedRepository):
             if root.exists():
                 found.extend(path for path in root.rglob("*") if path.is_file())
         return found
+
+
+class SharedValidatorPinTests(unittest.TestCase):
+    """The #3282 FINAL supplied_epoch_failure, pinned byte for byte by its source digest."""
+
+    def test_the_shared_rule_is_the_pinned_final_text(self):
+        digest = hashlib.sha256(inspect.getsource(kernel.supplied_epoch_failure).encode()).hexdigest()
+        self.assertEqual(digest, kernel.SHARED_VALIDATOR_SHA256)
+        self.assertEqual(kernel.SHARED_VALIDATOR_SHA256,
+                         "ad8ff52936d5bcd9a2ad6caceb2d9a637a099518989b34bbb3370301c7a4cce2")
+
+    def test_every_loaded_copy_of_the_rule_is_the_pinned_text(self):
+        copies = _kernel_instances(ingress, egress, capability, kernel)
+        self.assertGreaterEqual(len(copies), 4)
+        for copy in copies:
+            self.assertEqual(hashlib.sha256(inspect.getsource(copy.supplied_epoch_failure).encode())
+                             .hexdigest(), kernel.SHARED_VALIDATOR_SHA256)
+
+    def test_the_final_rule_on_carrier_references(self):
+        rule = kernel.supplied_epoch_failure
+        self.assertEqual(rule(4096, {"sampled_unix_ns": 1})[0], "HB_EPOCH_INVALID")
+        self.assertEqual(rule(4096, {"source": "ORGANIZATION_LEDGER_HEAD",
+                                     "head_receipt_sha": "sha256:" + "f" * 64})[0],
+                         "HB_EPOCH_PROVENANCE_UNMARKED")
+        self.assertEqual(rule(4096, {"derived_from_clock": False, "sampled_unix_ns": 1})[0],
+                         "HB_EPOCH_INVALID")
+        self.assertIsNone(rule(4096, {"derived_from_clock": False, "source": "X"}))
