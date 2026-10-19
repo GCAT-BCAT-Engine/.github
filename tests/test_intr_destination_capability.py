@@ -18,9 +18,11 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -1975,3 +1977,132 @@ class AnyFrameFailureIsTerminalTests(CopiedRepository):
             self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
         record = json.loads(latest.read_text(encoding="utf-8"))
         self.assertEqual(record["frames_seen"], 0)
+
+
+def _workflow_jobs(text):
+    """{job name: its block of lines} for a workflow file, read as text (no YAML dependency)."""
+    lines = text.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.rstrip() == "jobs:")
+    jobs, name = {}, None
+    for line in lines[start + 1:]:
+        header = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if header:
+            name = header.group(1)
+            jobs[name] = []
+        elif name is not None:
+            jobs[name].append(line)
+    return {key: "\n".join(value) for key, value in jobs.items()}
+
+
+def _workflow_triggers(text):
+    lines = text.splitlines()
+    start = next(index for index, line in enumerate(lines) if line.rstrip() == "on:")
+    triggers = []
+    for line in lines[start + 1:]:
+        if line and not line.startswith(" "):
+            break
+        match = re.match(r"^  ([A-Za-z_]+):", line)
+        if match:
+            triggers.append(match.group(1))
+    return triggers
+
+
+def _run_blocks(job):
+    """The shell scripts of a job's `run: |` steps, dedented, in order."""
+    lines, blocks, index = job.splitlines(), [], 0
+    while index < len(lines):
+        match = re.match(r"^(\s*)run: \|\s*$", lines[index])
+        if match:
+            indent, body, index = len(match.group(1)), [], index + 1
+            while index < len(lines) and (not lines[index].strip()
+                                          or len(lines[index]) - len(lines[index].lstrip()) > indent):
+                body.append(lines[index])
+                index += 1
+            blocks.append(textwrap.dedent("\n".join(body)))
+            continue
+        index += 1
+    return blocks
+
+
+def _epoch_requiring_scripts():
+    return {str(path.relative_to(ROOT)) for path in ROOT.rglob("*.py")
+            if "tests" not in path.parts and ".git" not in path.parts
+            and '"--hb-epoch"' in path.read_text(encoding="utf-8")}
+
+
+class InTreeDispatcherTests(CopiedRepository):
+    """MANIFEST_DISPATCHER_NOT_IN_TREE (08:32Z): the manifest's dispatcher is a workflow in this tree."""
+
+    MANIFEST = ROOT / "resident-runtime/activation-manifest.json"
+
+    def bindings(self):
+        return json.loads(self.MANIFEST.read_text(encoding="utf-8"))["epoch_bindings"]
+
+    def test_every_binding_names_an_in_tree_dispatcher_that_invokes_it_with_the_epoch(self):
+        for entrypoint, binding in self.bindings().items():
+            dispatcher = ROOT / binding["dispatcher"]
+            self.assertTrue(dispatcher.is_file(), binding["dispatcher"])
+            self.assertEqual(dispatcher.parent, ROOT / ".github/workflows")
+            text = dispatcher.read_text(encoding="utf-8")
+            self.assertEqual(_workflow_triggers(text), ["workflow_dispatch"])
+            self.assertRegex(text, r"hb_epoch:\n\s+description: [^\n]+\n\s+required: true")
+            self.assertNotIn("default:", text.split("jobs:")[0])
+            invocation = "python " + entrypoint + " "
+            invoking = [job for job in _workflow_jobs(text).values() if invocation in job]
+            self.assertTrue(invoking, entrypoint + " is not invoked by " + binding["dispatcher"])
+            for job in invoking:
+                gate, call = job.index("writer_epoch_refusal"), job.index(invocation)
+                self.assertLess(gate, call)
+                self.assertIn(binding["hb_epoch"]["argument"] + ' "$HB_EPOCH"', job[call:].split("\n")[0])
+
+    def run_dispatcher(self, hb_epoch):
+        dispatcher = ROOT / next(iter(self.bindings().values()))["dispatcher"]
+        job, = _workflow_jobs(dispatcher.read_text(encoding="utf-8")).values()
+        environment = {**os.environ, "HB_EPOCH": hb_epoch,
+                       "STEGVERSE_ORG_FEDERATION_ROOT": str(self.mesh)}
+        outputs = []
+        for script in _run_blocks(job):
+            run = subprocess.run(["bash", "-e", "-c", script], cwd=self.copy, env=environment,
+                                 capture_output=True, text=True, check=False)
+            outputs.append(run)
+            if run.returncode != 0:
+                break
+        return outputs
+
+    def test_the_dispatcher_passes_the_epoch_through(self):
+        services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
+        self.publish(services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-dispatcher",
+                                                          "message_class": "ecosystem.monitor.request",
+                                                          "subject": "probe", "body": {}}, "probe-dispatcher")
+        gate, cycle, status = self.run_dispatcher("4096")
+        for run in (gate, cycle, status):
+            self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("DISPATCH_HB_EPOCH=SUPPLIED", gate.stdout)
+        record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+        self.assertEqual((record["heartbeat_reference"]["epoch"], record["frames_consumed"]), (4096, 1))
+        self.assertIs(record["heartbeat_reference"]["derived_from_clock"], False)
+        self.assertEqual(json.loads(status.stdout)["heartbeat_reference"]["epoch"], 4096)
+
+    def test_the_dispatcher_refuses_an_empty_or_invalid_epoch_before_any_entrypoint(self):
+        for value, failure_code in (("", "HB_EPOCH_NOT_SUPPLIED"), ("+33", "HB_EPOCH_INVALID")):
+            runs = self.run_dispatcher(value)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0].returncode, 1)
+            self.assertEqual(json.loads(runs[0].stdout)["failure_code"], failure_code)
+        self.assertFalse((self.copy / "resident-runtime/federation/latest-cycle.json").exists())
+
+    def test_no_trigger_but_a_gated_dispatch_invokes_an_epoch_requiring_entrypoint(self):
+        scripts = _epoch_requiring_scripts()
+        self.assertTrue({"resident-runtime/federation_cycle.py", "resident-runtime/ecosystem_control.py",
+                         "resident-runtime/intr_destination_ingress.py"} <= scripts)
+        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            text = workflow.read_text(encoding="utf-8")
+            dispatch_only = _workflow_triggers(text) == ["workflow_dispatch"]
+            for name, job in _workflow_jobs(text).items():
+                for call in re.finditer(r"python3? (\S+\.py)", job):
+                    if call.group(1) not in scripts:
+                        continue
+                    where = workflow.name + ":" + name + ":" + call.group(1)
+                    self.assertTrue(dispatch_only or "if: github.event_name == 'workflow_dispatch'" in job, where)
+                    self.assertIn("writer_epoch_refusal", job[:call.start()], where)
+                    self.assertIn("--hb-epoch", job, where)
