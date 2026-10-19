@@ -3610,9 +3610,16 @@ class CarriedCrossingAdmissionRecordTests(CopiedRepository):
         closed = kernel.admission_id(frame)
         off_chain = "0" * 64
         directory = self.copy / "resident-runtime/federation/admissions.d"
-        token = json.loads((directory / (closed + ".json")).read_text(encoding="utf-8"))["admission_token"]
+        # The record holds only the token's digest. Give the closed record (and a forged open
+        # off-chain one) the digest of a token held here, so each case below holds the right token.
+        token = "1" * 64
+        closed_record = json.loads((directory / (closed + ".json")).read_text(encoding="utf-8"))
+        self.assertNotIn("admission_token", closed_record)
+        (directory / (closed + ".json")).write_text(json.dumps(
+            {**closed_record, "admission_token_sha256": kernel.sha(token)}), encoding="utf-8")
         (directory / (off_chain + ".json")).write_text(json.dumps({
-            "schema": kernel.ADMISSION_SCHEMA, "admission_id": off_chain, "admission_token": token,
+            "schema": kernel.ADMISSION_SCHEMA, "admission_id": off_chain,
+            "admission_token_sha256": kernel.sha(token),
             "packet_id": "probe-off-chain", "frame_sha256": self.FORGED, "head_receipt_sha": self.FORGED,
             "epoch": 4096, "closed": False}), encoding="utf-8")
         ledger = self.copy_ledger()
@@ -3741,6 +3748,27 @@ class CarriedCrossingAdmissionRecordTests(CopiedRepository):
         self.assertEqual((len(repository), len(organization)), (1, 1))
         self.assertEqual(self.crossing_receipts("probe-binding-own-forged"), ([], []))
 
+
+
+    def test_a_reader_of_an_open_record_holds_no_usable_token(self):
+        _, crossing, admitted = self.deferred_crossing("probe-binding-reader")
+        identifier = kernel.admission_id(crossing)
+        record = json.loads((self.copy / "resident-runtime/federation/admissions.d"
+                             / (identifier + ".json")).read_text(encoding="utf-8"))
+        self.assertEqual(record["closed"], False)
+        self.assertNotIn("admission_token", record)
+        ledger = self.copy_ledger()
+        before = self.ledger_files()
+        # Whatever the record holds, nothing in it is the token.
+        for value in [v for v in record.values() if isinstance(v, str)]:
+            provenance = {"source": "ORGANIZATION_LEDGER_HEAD", "head_receipt_sha": admitted,
+                          "admission_id": identifier, "admission_token": value}
+            with self.subTest(value=value[:16]):
+                with self.assertRaises(ValueError) as refused:
+                    ledger.append_repository("s9", "PROBE", kernel.sha({"p": 1}), kernel.sha({"p": 2}),
+                                             {}, "NONE", hb_epoch=4096, hb_provenance=provenance)
+                self.assertEqual(refused.exception.refusal["failure_code"], "CARRIED_PROVENANCE_UNVERIFIED")
+        self.assertEqual(self.ledger_files(), before)
 
 
 class ProcessBoundaryExitSplitTests(CopiedRepository):

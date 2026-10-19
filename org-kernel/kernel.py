@@ -329,8 +329,9 @@ def carried_provenance_refusal(detail:str, retry_entrypoint:str)->dict[str,Any]:
 
 ADMISSION_SCHEMA="stegverse.carried-crossing-admission.v1"
 #: What ingest threads to a crossing's writers, in process only. The id names
-#: the record; the token, drawn at random when ingest writes the record, is
-#: what proves the writer is inside that crossing. Neither is read from a frame.
+#: the record; the token, drawn at random each time ingest opens the record, is
+#: what proves the writer is inside that crossing. Neither is read from a frame,
+#: and the record keeps only the token's digest, never the token.
 ADMISSION_FIELDS=("admission_id","admission_token")
 
 def admission_directory(root:Path|None=None)->Path:
@@ -416,8 +417,8 @@ def carried_provenance_failure(reference:dict[str,Any], *, admission_root:Path|N
         if admitted is None:
             return "no open admission record "+repr(reference["admission_id"])+" was written by ingest"
         token=reference.get("admission_token")
-        if (not isinstance(token,str) or not isinstance(admitted.get("admission_token"),str)
-                or not hmac.compare_digest(token,admitted["admission_token"])):
+        if (not isinstance(token,str) or not isinstance(admitted.get("admission_token_sha256"),str)
+                or not hmac.compare_digest(sha(token),admitted["admission_token_sha256"])):
             return ("the admission token is not the one ingest threaded to this crossing; an admission "
                     "record admits only the crossing it was written for")
         if admitted.get("head_receipt_sha")!=claimed or admitted.get("epoch")!=reference.get("epoch"):
@@ -554,9 +555,12 @@ def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
             if frame_provenance(frame) is not None else None)
     admitted=None
     if record is not None:
-        admitted={key:record.get(key) for key in ADMISSION_FIELDS}
-        if record.get("closed") is not False:
-            write_json_atomic(admission_directory(root)/(record["admission_id"]+".json"),{**record,"closed":False})
+        # Reopened for this ingest with a fresh token; only its digest is
+        # durable, so no reader of the record can hold a usable token.
+        admitted={"admission_id":record["admission_id"],"admission_token":secrets.token_hex(32)}
+        reopened={key:value for key,value in record.items() if key!="admission_token"}
+        write_json_atomic(admission_directory(root)/(record["admission_id"]+".json"),
+                          {**reopened,"admission_token_sha256":sha(admitted["admission_token"]),"closed":False})
     try:
         carried=carried_frame_epoch(frame,admission=admitted,admission_root=root)
     except SuppliedEpochRefused:
@@ -582,7 +586,8 @@ def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
         if admitted is None:
             admitted={"admission_id":admission_id(frame),"admission_token":secrets.token_hex(32)}
             write_json_atomic(admission_directory(root)/(admitted["admission_id"]+".json"),{
-                "schema":ADMISSION_SCHEMA,**admitted,"packet_id":frame["packet_id"],
+                "schema":ADMISSION_SCHEMA,"admission_id":admitted["admission_id"],
+                "admission_token_sha256":sha(admitted["admission_token"]),"packet_id":frame["packet_id"],
                 "frame_sha256":frame["frame_sha256"],"head_receipt_sha":provenance["head_receipt_sha"],
                 "epoch":carried,"closed":False})
         provenance={**provenance,**admitted}
