@@ -288,7 +288,7 @@ def write_once_json(path:Path, value:Any, *, collision:str)->Path:
     if path.exists():
         try:
             existing=json.loads(path.read_bytes().decode("utf-8"))
-        except ValueError:
+        except JSON_DOCUMENT_ERRORS:
             existing=_TORN
         if existing is not _TORN:
             if existing!=value:
@@ -297,6 +297,11 @@ def write_once_json(path:Path, value:Any, *, collision:str)->Path:
     return write_json_atomic(path,value)
 
 _TORN=object()
+
+#: Everything parsing one JSON document can raise for its content: not UTF-8,
+#: not JSON, or nested past the parser's depth (RecursionError) or memory. A
+#: peer- or caller-supplied document raising one is that document's fault.
+JSON_DOCUMENT_ERRORS=(ValueError,UnicodeError,RecursionError,MemoryError)
 
 def persist_outbox(root:Path, frame:dict[str,Any])->Path:
     out=root/"resident-runtime/federation/outbox"
@@ -354,7 +359,7 @@ def admission_record(identifier:Any, *, root:Path|None=None, include_closed:bool
     path=admission_directory(root)/(identifier+".json")
     try:
         record=json.loads(path.read_bytes().decode("utf-8"))
-    except (OSError,ValueError):
+    except (OSError,*JSON_DOCUMENT_ERRORS):
         return None
     if not isinstance(record,dict) or record.get("schema")!=ADMISSION_SCHEMA or record.get("admission_id")!=identifier:
         return None
@@ -612,7 +617,7 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "ADMISSION_SCHEMA","ADMISSION_FIELDS","ingest_or_quarantine","frame_failure_refusal",
          "recorded_response","response_collision_refusal","writer_fault_refusal","cli_refusal",
          "WRITER_IO_FAILED","WRITER_WRITE_FAILED","CLI_INPUT_INVALID","InputRefused","input_refusal",
-         "read_json_input","collision_refusal","LEDGER_RECEIPT_COLLISION","control_response_packet_id","request_binding",
+         "read_json_input","JSON_DOCUMENT_ERRORS","collision_refusal","LEDGER_RECEIPT_COLLISION","control_response_packet_id","request_binding",
          "RESPONSE_ID_COLLISION","ResponseIdCollision","RESPONDING_MESSAGE_CLASSES","write_json_atomic","write_once_json",
          "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED","FRAME_DISPATCH_IO_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
@@ -656,8 +661,9 @@ def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str
             frame=json.loads(path.read_bytes().decode("utf-8"))
             if not isinstance(frame,dict):
                 raise ValueError("carrier_frame_not_an_object")
-        except (ValueError,UnicodeDecodeError,OSError) as exc:
-            # Unreadable, oversized, not UTF-8, not JSON or not an object: each
+        except (*JSON_DOCUMENT_ERRORS,OSError) as exc:
+            # Unreadable, oversized, not UTF-8, not JSON, nested past the
+            # parser's depth, or not an object: each
             # file is guarded on its own and offered to a consuming cycle, which
             # quarantines it by name; it blocks no cycle.
             if include_unreadable:
@@ -1056,7 +1062,7 @@ def read_json_input(source:Any, *, argument:str, retry_entrypoint:str, inline:bo
     try:
         raw=source.encode("utf-8") if inline else Path(source).read_bytes()
         value=json.loads(raw.decode("utf-8"))
-    except (OSError,UnicodeError,ValueError) as exc:
+    except (OSError,*JSON_DOCUMENT_ERRORS) as exc:
         raise InputRefused(input_refusal(argument,type(exc).__name__+": "+str(exc),
                                          retry_entrypoint=retry_entrypoint)) from None
     if expect is not None and not isinstance(value,expect):
@@ -1204,7 +1210,7 @@ def recorded_response(response_packet_id:str, request_packet:dict[str,Any], *,
             if not isinstance(frame,dict) or frame.get("packet_id")!=response_packet_id:
                 continue
             packet=recover_packet(frame)
-        except (ValueError,KeyError,TypeError,AttributeError,OSError):
+        except (*JSON_DOCUMENT_ERRORS,KeyError,TypeError,AttributeError,OSError):
             continue
         body=(packet.get("payload") or {}).get("body") or {}
         recorded={key:body.get(key) for key in binding}
@@ -1226,7 +1232,7 @@ def response_collision_refusal(frame:Any, *, mesh_root:Path|None=None)->dict[str
         recorded_response(control_response_packet_id(packet),packet,mesh_root=mesh_root)
     except ResponseIdCollision as exc:
         return exc.refusal
-    except (ValueError,KeyError,TypeError,AttributeError):
+    except (*JSON_DOCUMENT_ERRORS,KeyError,TypeError,AttributeError):
         return None
     return None
 

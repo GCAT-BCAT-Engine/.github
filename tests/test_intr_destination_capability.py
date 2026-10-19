@@ -13,6 +13,7 @@ an authentic production receipt or a live peer installation.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -80,6 +81,10 @@ def binding(profile_id, document=None):
 
 def row(service_id):
     return next(item for item in REGISTRY["services"] if item["service_id"] == service_id)
+
+
+#: F-SCAN-RECURSION (VALIDATOR V-P11): under the size cap, but nested past the JSON parser's depth.
+DEEP_JSON = '{"a":' + "[" * 200000
 
 
 def diagnostic(communication_id="intr-destination-diagnostic-001", schema=PAYLOAD_SCHEMA):
@@ -3347,7 +3352,7 @@ class InputTraceTests(WriterTraceTests):
     on any CLI argument is a TERMINAL six-field CLI_INPUT_INVALID, non-zero, with nothing written and
     no traceback. Inputs are read before any write, outside the own-state fault classifier."""
 
-    BAD_INPUTS = ("missing", "directory", "not-utf-8", "not-json", "wrong-type")
+    BAD_INPUTS = ("missing", "directory", "not-utf-8", "not-json", "wrong-type", "deep")
 
     def bad_input(self, kind):
         path = self.inputs / ("bad-" + kind)
@@ -3359,10 +3364,12 @@ class InputTraceTests(WriterTraceTests):
             path.write_text("{not json", encoding="utf-8")
         elif kind == "wrong-type":
             path.write_text("[1, 2]", encoding="utf-8")
+        elif kind == "deep":
+            path.write_text(DEEP_JSON, encoding="utf-8")
         return path
 
     def bad_inline(self, kind):
-        return {"not-json": "{not json", "wrong-type": "[1, 2]"}.get(kind)
+        return {"not-json": "{not json", "wrong-type": "[1, 2]", "deep": DEEP_JSON}.get(kind)
 
     def assert_terminal_input_refusal(self, load, argv, argument):
         self.reset()
@@ -3388,7 +3395,7 @@ class InputTraceTests(WriterTraceTests):
                 self.assert_terminal_input_refusal(load, argv_for(str(self.bad_input(kind))), argument)
 
     def each_bad_inline(self, load, argv_for, argument):
-        for kind in ("not-json", "wrong-type"):
+        for kind in ("not-json", "wrong-type", "deep"):
             with self.subTest(argument=argument, kind=kind):
                 self.assert_terminal_input_refusal(load, argv_for(self.bad_inline(kind)), argument)
 
@@ -3815,7 +3822,7 @@ class ProcessBoundaryExitSplitTests(CopiedRepository):
     def test_process_boundary_exits_65_for_a_bad_crossing_and_75_for_its_own_write_fault(self):
         out = Path(self._work.name) / "out" / "execution.json"
         for name, value in (("missing.json", None), ("not-json.json", "{not json"), ("list.json", "[1]"),
-                            ("fields.json", {"packet_id": "x"}),
+                            ("fields.json", {"packet_id": "x"}), ("deep.json", DEEP_JSON),
                             ("elsewhere.json", {**self.envelope(), "destination": {"org": PEER, "service": "x"}})):
             with self.subTest(input=name):
                 path = Path(self._work.name) / name if value is None else self.write(name, value)
@@ -3895,3 +3902,121 @@ class ProcessBoundaryExitSplitTests(CopiedRepository):
         self.assertEqual(run.returncode, 75, run.stderr)
         self.six_field(run, "RUN_ONCE_WRITE_FAULT", False)
         self.assertFalse(egress.exists())
+
+    def stub_result(self, content):
+        """A process_boundary that exits 0 having written `content` as its --out result."""
+        path = self.copy / "org-boundary/runtime/process_boundary.py"
+        original = path.read_text(encoding="utf-8")
+        path.write_text("import sys\nout = sys.argv[sys.argv.index('--out') + 1]\n"
+                        "open(out, 'w').write(%r)\nsys.exit(0)\n" % content, encoding="utf-8")
+        return lambda: path.write_text(original, encoding="utf-8")
+
+    def test_run_once_refuses_an_exit_0_result_it_cannot_egress(self):
+        """RUN_ONCE_RESULT_READ_UNGUARDED (VALIDATOR V-P11 @451470e)."""
+        ingress, egress = self.write("ingress.json", self.envelope()), Path(self._work.name) / "egress" / "egress.json"
+        for name, content in (("not-json", "{not json"), ("list", "[1, 2]"), ("invalid-egress", '{"consumed": true}'),
+                              ("deep", DEEP_JSON)):
+            with self.subTest(result=name):
+                restore = self.stub_result(content)
+                try:
+                    run = self.run_once(ingress, egress)
+                finally:
+                    restore()
+                self.assertEqual(run.returncode, 65, run.stderr)
+                self.six_field(run, "PROCESS_BOUNDARY_RESULT_INVALID", True)
+                self.assertFalse(egress.exists())
+        run = self.run_once(ingress, egress)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
+
+class DeepJsonFrameTests(CopiedRepository):
+    """F-SCAN-RECURSION (VALIDATOR V-P11, frozen F-SCAN): a peer-writable frame nested past the JSON
+    parser's depth is quarantined six-field FRAME_INGEST_FAILED, and the valid frame next to it is
+    consumed once in the same cycle, on the cycle and the gateway paths."""
+
+    cycle = TransientWriterFaultTests.cycle
+    run_cycle = TransientWriterFaultTests.run_cycle
+
+    def deep_packet_frame(self, packet_id):
+        """A well-formed carrier frame whose bound packet is nested past the parser's depth."""
+        frame = kernel.carrier_frame(kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=ADDRESS, payload=diagnostic(packet_id),
+            transition_reference="intr:transition:" + packet_id, authority_effect="NONE", packet_id=packet_id),
+            epoch=4096)
+        raw = DEEP_JSON.encode("utf-8")
+        body = {key: value for key, value in frame.items() if key != "frame_sha256"}
+        body.update({"packet_base64": base64.b64encode(raw).decode("ascii"), "packet_sha256": kernel.sha(raw)})
+        return {**body, "frame_sha256": kernel.sha(body)}
+
+    def markers(self):
+        directory = self.copy / "resident-runtime/federation/seen.d"
+        return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(directory.glob("*.json"))]
+
+    def test_a_deep_frame_file_is_quarantined_and_the_valid_frame_beside_it_consumed_once(self):
+        frames = self.mesh / "frames.d"
+        frames.mkdir(parents=True)
+        (frames / "0000-deep.json").write_text(DEEP_JSON, encoding="utf-8")
+        self.assertLess((frames / "0000-deep.json").stat().st_size, kernel.MAX_CARRIER_FRAME_BYTES)
+        kernel.publish_frame(self.deep_packet_frame("probe-deep-packet"), root=self.mesh)
+        self.publish(ADDRESS, diagnostic("probe-deep-neighbour"), "probe-deep-neighbour")
+        cycle = self.cycle()
+        record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_consumed"], record["frames_refused"]), (1, 2))
+        refused = [marker for marker in self.markers() if marker["status"] == "REFUSED"]
+        self.assertEqual(len(refused), 2)
+        for marker in refused:
+            self.assertEqual((marker["refusal"]["failure_code"], marker["refusal"]["refused_failure_code"],
+                              marker["refusal"]["terminal"]), ("FRAME_REFUSED_QUARANTINED", "FRAME_INGEST_FAILED", True))
+            self.assertIn("RecursionError", marker["refusal"]["detail"] + marker["refusal"]["failed_predicate"])
+        self.assertEqual(self.run_cycle(cycle)["frames_seen"], 0)
+        repository = [r for r in self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+                      if (r.get("evidence") or {}).get("communication_id") == "probe-deep-neighbour"]
+        self.assertEqual(len(repository), 1)
+
+    def gateway(self):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "gateway_deep", self.copy / "resident-runtime/federation_gateway_transport.py"))
+        module.__spec__.loader.exec_module(module)
+        return module
+
+    def test_the_gateway_quarantines_a_deep_packet_and_then_consumes_a_valid_frame(self):
+        gateway = self.gateway()
+        good = kernel.carrier_frame(kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=ADDRESS, payload=diagnostic("probe-deep-gateway"),
+            transition_reference="intr:transition:probe-deep-gateway", authority_effect="NONE",
+            packet_id="probe-deep-gateway"), epoch=4096)
+        acks = []
+
+        def json_request(method, path, body=None, headers=None):
+            if path.endswith("/acknowledgements"):
+                acks.append(body)
+                return {"state": body["state"]}
+            return {"state": "PENDING"}
+
+        for frame, state in ((self.deep_packet_frame("probe-deep-gateway-packet"), "REFUSED"), (good, "CONSUMED")):
+            with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
+                    mock.patch.object(gateway, "_json_request", side_effect=json_request):
+                result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
+            self.assertEqual(result["state"], state, result.get("refusal"))
+        self.assertEqual([ack["state"] for ack in acks], ["BLOCKED", "CONSUMED"])
+
+    def test_a_deep_gateway_response_is_a_non_terminal_six_field_record(self):
+        cycle = self.cycle()
+
+        class Response:
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def read(self):
+                return DEEP_JSON.encode("utf-8")
+
+        with mock.patch.dict(os.environ, {"STEGVERSE_ORG_FEDERATION_GATEWAY_URL": "https://gateway.invalid"}), \
+                mock.patch.object(cycle.GW, "urlopen", return_value=Response()), \
+                mock.patch("builtins.print") as printed:
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 1)
+        refusal = json.loads(printed.call_args.args[0])
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("GATEWAY_TRANSPORT_FAILED", False))
+

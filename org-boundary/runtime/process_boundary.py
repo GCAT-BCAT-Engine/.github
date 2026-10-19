@@ -18,7 +18,7 @@ def canon(v): return json.dumps(v,sort_keys=True,separators=(",",":")).encode()
 def hid(prefix,v): return prefix+"-"+hashlib.sha256(canon(v)).hexdigest()[:24]
 def load(path,argument):
  try: value=json.loads(Path(path).read_bytes().decode("utf-8"))
- except (OSError,UnicodeError,ValueError) as exc: raise input_fault(argument+": "+type(exc).__name__+": "+str(exc)) from None
+ except (OSError,UnicodeError,ValueError,RecursionError,MemoryError) as exc: raise input_fault(argument+": "+type(exc).__name__+": "+str(exc)[:200]) from None
  if not isinstance(value,dict): raise input_fault(argument+": the document is a "+type(value).__name__+", not a JSON object")
  return value
 def write_out(path,text):

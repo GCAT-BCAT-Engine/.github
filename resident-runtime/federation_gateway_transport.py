@@ -196,7 +196,7 @@ def _submitted_response_record(repo_root: Path, request_packet: dict[str, Any]) 
     if path.is_file():
         try:
             record = json.loads(path.read_bytes().decode("utf-8"))
-        except ValueError:
+        except K.JSON_DOCUMENT_ERRORS:
             record = None
     if not isinstance(record, dict) or not isinstance(record.get("frame"), dict):
         return None
@@ -216,7 +216,7 @@ def _gateway_response_collision(repo_root: Path, frame: Any) -> dict[str, Any] |
         _submitted_response_record(repo_root, packet)
     except K.ResponseIdCollision as exc:
         return exc.refusal
-    except (ValueError, KeyError, TypeError, AttributeError):
+    except (*K.JSON_DOCUMENT_ERRORS, KeyError, TypeError, AttributeError):
         pass
     return None
 

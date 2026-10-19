@@ -55,6 +55,18 @@ def main(argv:list[str]|None=None)->int:
         # read by its `refusal`, not its class. A write fault outside any one
         # frame is non-terminal six-field. No cycle record is written.
         refusal=K.cli_refusal(exc,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+        if refusal is None and isinstance(exc,GW.FederationGatewayTransportError):
+            # The gateway did not answer with a usable document (unreachable,
+            # not JSON, nested past the parser's depth): nothing was consumed or
+            # acknowledged, so the next cycle fetches again.
+            refusal={"disposition":"FAIL_CLOSED","failure_code":"GATEWAY_TRANSPORT_FAILED","terminal":False,
+                     "failed_predicate":"THE_GATEWAY_ANSWERS_WITH_A_USABLE_DOCUMENT",
+                     "detail":type(exc).__name__+": "+str(exc)[:200],
+                     "required_evidence_or_repair":"the shared-service gateway answers with a JSON document",
+                     "retry_entrypoint":EPOCH_RETRY_ENTRYPOINT,
+                     "owning_existing_goal":K.HB_EPOCH_OWNING_EXISTING_GOAL,
+                     "next_attempt":"run the cycle again; no frame was consumed or acknowledged",
+                     "consequence_committed":False}
         if refusal is None:
             raise
         print(json.dumps(refusal,sort_keys=True))
