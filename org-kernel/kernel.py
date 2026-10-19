@@ -752,7 +752,7 @@ def quarantine_result(frame:dict[str,Any], refusal:dict[str,Any])->dict[str,Any]
     not hold back the frames behind it. No clock is read and none is written.
     """
     return {"status":"REFUSED","packet_id":frame.get("packet_id"),
-            "refusal":{"disposition":"FAIL_CLOSED","failure_code":FRAME_REFUSED_QUARANTINED,
+            "refusal":{"disposition":"FAIL_CLOSED","failure_code":FRAME_REFUSED_QUARANTINED,"terminal":True,
                        "failed_predicate":refusal.get("failed_predicate"),
                        "detail":"frame refused at ingest: "+str(refusal.get("failure_code"))+": "+str(refusal.get("detail")),
                        "refused_failure_code":refusal.get("failure_code"),
@@ -784,15 +784,26 @@ def frame_failure_refusal(exc:BaseException)->dict[str,Any]:
             "consequence_committed":False}
 
 FRAME_DISPATCH_IO_FAILED="FRAME_DISPATCH_IO_FAILED"
+FRAME_DISPATCH_WRITE_FAILED="FRAME_DISPATCH_WRITE_FAILED"
 
-def dispatch_io_deferral(frame:dict[str,Any], exc:OSError)->dict[str,Any]:
+def is_writer_fault(exc:BaseException)->bool:
+    """This boundary failing to record its own state, not a defect of the frame.
+
+    An OSError, or a ledger store's LedgerWriteFailed (a lost comparison it
+    could not retry past, a failed substrate command), from whichever loaded
+    copy of the store raised it.
+    """
+    return isinstance(exc,OSError) or getattr(exc,"writer_fault",False) is True
+
+def dispatch_io_deferral(frame:dict[str,Any], exc:BaseException)->dict[str,Any]:
     """A frame left pending because this boundary could not record its own state.
 
     The frame is not at fault, so it gets no seen marker: the next cycle offers
     it again, and the ledgers' idempotent replay consumes it exactly once.
     """
+    code=FRAME_DISPATCH_IO_FAILED if isinstance(exc,OSError) else FRAME_DISPATCH_WRITE_FAILED
     return {"status":"DEFERRED","packet_id":frame.get("packet_id"),
-            "refusal":{"disposition":"FAIL_CLOSED","failure_code":FRAME_DISPATCH_IO_FAILED,
+            "refusal":{"disposition":"FAIL_CLOSED","failure_code":code,"terminal":False,
                        "failed_predicate":"THIS_BOUNDARY_RECORDS_ITS_OWN_STATE",
                        "detail":type(exc).__name__+": "+str(exc),
                        "required_evidence_or_repair":"this boundary's own storage accepts the write",
@@ -807,10 +818,12 @@ def ingest_or_quarantine(root:Path, frame:Any, *, mesh_root:Path|None=None,
 
     The guard is total. Any error that is the frame's own -- a six-field
     refusal, a broken digest, a wrong-typed field, a malformed frame, an
-    adapter error -- is a six-field refusal and a REFUSED result. An OSError
-    is this boundary's own storage failing, not the frame: it is a DEFERRED
-    result with a six-field FRAME_DISPATCH_IO_FAILED and no marker, so the
-    frame stays pending. Either way the cycle continues with the next frame.
+    adapter error -- is a six-field refusal and a REFUSED result. A writer
+    fault (an OSError, or a ledger store's LedgerWriteFailed such as a lost
+    comparison) is this boundary's own storage failing, not the frame: it is a
+    DEFERRED result, six-field FRAME_DISPATCH_IO_FAILED or
+    FRAME_DISPATCH_WRITE_FAILED with terminal false, and no marker, so the frame
+    stays pending. Either way the cycle continues with the next frame.
     No clock is read.
     """
     try:
@@ -818,9 +831,10 @@ def ingest_or_quarantine(root:Path, frame:Any, *, mesh_root:Path|None=None,
             raise ValueError("carrier_frame_not_an_object")
         packet=recover_packet(frame)
         return packet,ingest_frame(root,frame,mesh_root=mesh_root,hb_epoch=hb_epoch)
-    except OSError as exc:
-        return None,dispatch_io_deferral(frame if isinstance(frame,dict) else {},exc)
     except Exception as exc:
+        # The writer's own fault is checked before the content guard.
+        if is_writer_fault(exc):
+            return None,dispatch_io_deferral(frame if isinstance(frame,dict) else {},exc)
         return None,quarantine_result(frame if isinstance(frame,dict) else {},frame_failure_refusal(exc))
 
 def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[str]|None=None,

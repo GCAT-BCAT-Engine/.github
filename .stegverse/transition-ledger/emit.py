@@ -123,7 +123,7 @@ def append(transition_id,transition_class,predecessor_state_sha256,successor_sta
   new_head={"repository":C["repository"],"receipt_sha256":dg,"receipt_path":target.locator(key)}
   if target.append_transaction(key,r,expected_head,new_head):
    return r
- raise SystemExit("REPO_LEDGER_APPEND_CONTENTION_EXHAUSTED")
+ raise ledger_store.LedgerWriteFailed("REPO_LEDGER_APPEND_CONTENTION_EXHAUSTED")
 
 def main():
  p=argparse.ArgumentParser();p.add_argument("--transition-id",required=True);p.add_argument("--transition-class",required=True);p.add_argument("--predecessor-state-sha256",required=True);p.add_argument("--successor-state-sha256",required=True);p.add_argument("--evidence-json",default="{}");p.add_argument("--authority-effect",default="NONE");p.add_argument("--hb-epoch",default=None,help="heartbeat epoch, ASCII digits >= 32; the append refuses when absent or invalid");a=p.parse_args()
@@ -132,5 +132,7 @@ def main():
   print(json.dumps(chain_break_refusal(exc),sort_keys=True));raise SystemExit(1)
  except RepoLedgerEpochRefused as exc:
   print(json.dumps(exc.refusal,sort_keys=True));raise SystemExit(1)
+ except ledger_store.LedgerWriteFailed as exc:
+  raise SystemExit(str(exc))
  print(json.dumps(r,sort_keys=True))
 if __name__=="__main__":main()

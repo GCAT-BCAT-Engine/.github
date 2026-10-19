@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ledger_store import HEAD_KEY, RECEIPT_PREFIX, SOURCE_PREFIX, open_store, parse_locator, receipt_key, source_key  # noqa: E402
+from ledger_store import HEAD_KEY, RECEIPT_PREFIX, SOURCE_PREFIX, LedgerWriteFailed, open_store, parse_locator, receipt_key, source_key  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 C = json.loads((ROOT / ".stegverse/transition-ledger/org-contract.json").read_text())
@@ -428,7 +428,7 @@ def append(source_receipt, org_transition_class, predecessor_state, successor_st
         }
         if target.append_transaction(key, receipt, expected_head, new_head, immutable=retained):
             return receipt
-    raise SystemExit("ORG_LEDGER_APPEND_CONTENTION_EXHAUSTED")
+    raise LedgerWriteFailed("ORG_LEDGER_APPEND_CONTENTION_EXHAUSTED")
 
 
 def main():
@@ -462,6 +462,8 @@ def main():
     except OrgLedgerEpochRefused as exc:
         print(json.dumps(exc.refusal, sort_keys=True))
         raise SystemExit(1)
+    except LedgerWriteFailed as exc:
+        raise SystemExit(str(exc))
     print(json.dumps(result, sort_keys=True))
 
 

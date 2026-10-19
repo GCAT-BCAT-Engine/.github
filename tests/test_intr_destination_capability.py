@@ -14,6 +14,7 @@ an authentic production receipt or a live peer installation.
 from __future__ import annotations
 
 import hashlib
+import importlib.machinery
 import importlib.util
 import inspect
 import json
@@ -21,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -2382,3 +2384,109 @@ class TotalGuardAndDispatchIoTests(CopiedRepository):
         for field in SuppliedEpochParsingTests.SIX_FIELDS:
             self.assertIn(field, result["refusal"])
         self.assertEqual(sent, [])
+
+
+class DispatcherFindingTests(unittest.TestCase):
+    """08:43Z bar: the manifest that denies GitHub Actions runtime authority records its dispatcher finding."""
+
+    def test_the_manifest_records_the_pending_substrate_finding_six_field(self):
+        manifest = json.loads((ROOT / "resident-runtime/activation-manifest.json").read_text(encoding="utf-8"))
+        self.assertIs(manifest["github_actions_is_runtime_authority"], False)
+        finding, = [row for row in manifest["dispatcher_findings"]
+                    if row["failure_code"] == "RUNTIME_DISPATCHER_PENDING_SUBSTRATE"]
+        for field in ("disposition", "failed_predicate", "required_evidence_or_repair",
+                      "retry_entrypoint", "owning_existing_goal", "next_attempt"):
+            self.assertTrue(finding[field], field)
+        self.assertIs(finding["blocking"], False)
+        self.assertIn("WU-B13", finding["owning_existing_goal"])
+
+
+class TransientWriterFaultTests(CopiedRepository):
+    """F-TRANSIENT-RT: a lost comparison on a ledger append defers the frame; it is consumed exactly once later."""
+
+    def setUp(self):
+        super().setUp()
+        self.losing = None
+        test = self
+
+        def lose(original):
+            def append_transaction(store, *args, **kwargs):
+                if test.losing is not None and str(Path(store.root).resolve()).startswith(test.losing):
+                    return False
+                return original(store, *args, **kwargs)
+            append_transaction.__wrapped_original__ = original
+            return append_transaction
+
+        def patch_store_classes(module):
+            store = getattr(module, "PosixLedgerStore", None)
+            if store is not None and not hasattr(store.append_transaction, "__wrapped_original__"):
+                original = store.append_transaction
+                store.append_transaction = lose(original)
+                self.addCleanup(setattr, store, "append_transaction", original)
+
+        for module in list(sys.modules.values()):
+            patch_store_classes(module)
+        real_exec = importlib.machinery.SourceFileLoader.exec_module
+
+        def exec_module(loader, module):
+            real_exec(loader, module)
+            patch_store_classes(module)
+        patcher = mock.patch.object(importlib.machinery.SourceFileLoader, "exec_module", exec_module)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def cycle(self):
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_transient", self.copy / "resident-runtime/federation_cycle.py"))
+        module.__spec__.loader.exec_module(module)
+        return module
+
+    def run_cycle(self, cycle):
+        with mock.patch("builtins.print"):
+            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+        return json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+
+    def marker(self, packet_id):
+        for path in (self.copy / "resident-runtime/federation/seen.d").glob("*.json"):
+            marker = json.loads(path.read_text(encoding="utf-8"))
+            if marker.get("packet_id") == packet_id:
+                return marker
+        return None
+
+    def ledgers(self):
+        return (self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1"),
+                self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1"))
+
+    def assert_deferred_then_once(self, losing_root, packet_id, repository_after_first):
+        self.publish(ADDRESS, diagnostic(packet_id), packet_id)
+        cycle = self.cycle()
+        self.losing = str(Path(losing_root).resolve())
+        results = []
+        real_consume = cycle.K.consume_and_respond
+        with mock.patch.object(cycle.K, "consume_and_respond",
+                               side_effect=lambda *a, **k: results.extend(real_consume(*a, **k)) or results):
+            record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_consumed"], record["frames_refused"], record["frames_deferred"]),
+                         (0, 0, 1))
+        refusal = results[0]["result"]["refusal"]
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("FRAME_DISPATCH_WRITE_FAILED", False))
+        self.assertIn("CONTENTION_EXHAUSTED", refusal["detail"])
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, refusal)
+        self.assertIsNone(self.marker(packet_id))
+        repository, organization = self.ledgers()
+        self.assertEqual((len(repository), len(organization)), (repository_after_first, 0))
+        self.losing = None
+        record = self.run_cycle(cycle)
+        self.assertEqual((record["frames_consumed"], record["frames_deferred"]), (1, 0))
+        self.assertEqual(self.marker(packet_id)["status"], "CONSUMED")
+        repository, organization = self.ledgers()
+        self.assertEqual((len(repository), len(organization)), (1, 1))
+        self.assertEqual(organization[0]["repo_receipt_sha256"], repository[0]["receipt_sha256"])
+        self.assertEqual(self.run_cycle(cycle)["frames_seen"], 0)
+
+    def test_a_lost_comparison_on_every_append_defers_and_writes_nothing(self):
+        self.assert_deferred_then_once(Path(self._work.name), "probe-lost-every", 0)
+
+    def test_a_lost_comparison_on_the_organization_append_defers_and_the_replay_lands_once(self):
+        self.assert_deferred_then_once(os.environ["STEGVERSE_ORG_LEDGER_ROOT"], "probe-lost-org", 1)
