@@ -1,0 +1,38 @@
+{
+  "authority_effect": "NONE",
+  "boundary_evidence": {
+    "communication_id": "intr-path-v1:GCAT-BCAT-Engine->Admissible-Existence",
+    "destination_organization": "Admissible-Existence",
+    "disposition": "ALLOW",
+    "operation": "INTR_MESH_PATH_TRANSFER",
+    "path_id": "GCAT-BCAT-Engine->Admissible-Existence:intr-destination",
+    "profile_id": "intr-mesh-path-transfer",
+    "repository": "GCAT-BCAT-Engine/.github",
+    "transfer_commit": "620a5ccbfc26463afe829f64dc6cf76ce85477ac"
+  },
+  "canonical_state_transition_receipt_sha256": null,
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "derived_from_clock": false,
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 0,
+    "progression_dependency": "OSCILLATOR_ONLY"
+  },
+  "org_transition_class": "REPO_STATE_PROPAGATION",
+  "organization": "GCAT-BCAT-Engine",
+  "predecessor_org_state_sha256": "sha256:6e1a89503ee2cc904e2bde27718e00b41ebe300e91594a59b1fb53a647c5094d",
+  "previous_receipt_sha256": "sha256:1820247d20084e97c350fa83dbd9a5c8ddf0ce6f5f6240de14c8831648c24d85",
+  "receipt_sha256": "sha256:9cbe201829d21bca6a4666f720c4ada4a066f6247c47c331eb8de5e86dcc5ad9",
+  "repo_receipt_sha256": "sha256:bf1b7cf778fd06e1dcbcea86c6b1d10786802bb7a2a73128a0b156a0d14a313b",
+  "repo_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->Admissible-Existence:intr-destination@intr-path-v1:GCAT-BCAT-Engine->Admissible-Existence",
+  "schema": "stegverse.organization-transition-receipt/v1",
+  "source_receipt_schema": "stegverse.repo-transition-receipt/v1",
+  "source_repository": "GCAT-BCAT-Engine/.github",
+  "source_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->Admissible-Existence:intr-destination@intr-path-v1:GCAT-BCAT-Engine->Admissible-Existence",
+  "source_transition_sha256": "sha256:bf1b7cf778fd06e1dcbcea86c6b1d10786802bb7a2a73128a0b156a0d14a313b",
+  "subject_or_correlation_id": null,
+  "successor_org_state_sha256": "sha256:467b77e5d460c2e33b3d11992ed15376c60e33adbb98ab9867d312c842808a0e"
+}
