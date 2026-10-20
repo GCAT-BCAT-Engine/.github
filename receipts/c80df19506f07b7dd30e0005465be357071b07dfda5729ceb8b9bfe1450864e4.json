@@ -1,0 +1,38 @@
+{
+  "authority_effect": "NONE",
+  "boundary_evidence": {
+    "communication_id": "intr-path-v1:GCAT-BCAT-Engine->StegVerse-Labs",
+    "destination_organization": "StegVerse-Labs",
+    "disposition": "ALLOW",
+    "operation": "INTR_MESH_PATH_TRANSFER",
+    "path_id": "GCAT-BCAT-Engine->StegVerse-Labs:intr-destination",
+    "profile_id": "intr-mesh-path-transfer",
+    "repository": "GCAT-BCAT-Engine/.github",
+    "transfer_commit": "620a5ccbfc26463afe829f64dc6cf76ce85477ac"
+  },
+  "canonical_state_transition_receipt_sha256": null,
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "derived_from_clock": false,
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 0,
+    "progression_dependency": "OSCILLATOR_ONLY"
+  },
+  "org_transition_class": "REPO_STATE_PROPAGATION",
+  "organization": "GCAT-BCAT-Engine",
+  "predecessor_org_state_sha256": "sha256:45d5fd1a870e7f3015c0351ccc9f1c8549be5db05b80bea54b51cee1ce9cc992",
+  "previous_receipt_sha256": "sha256:ed104f4e3875c5418589667501a9b03ae107fe3b544259a3d00778e93e0d79c3",
+  "receipt_sha256": "sha256:c80df19506f07b7dd30e0005465be357071b07dfda5729ceb8b9bfe1450864e4",
+  "repo_receipt_sha256": "sha256:d01a5176b53cc002680c0110c2091522cf2c21248e5c4e746647ff623cad8cf0",
+  "repo_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->StegVerse-Labs:intr-destination@intr-path-v1:GCAT-BCAT-Engine->StegVerse-Labs",
+  "schema": "stegverse.organization-transition-receipt/v1",
+  "source_receipt_schema": "stegverse.repo-transition-receipt/v1",
+  "source_repository": "GCAT-BCAT-Engine/.github",
+  "source_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->StegVerse-Labs:intr-destination@intr-path-v1:GCAT-BCAT-Engine->StegVerse-Labs",
+  "source_transition_sha256": "sha256:d01a5176b53cc002680c0110c2091522cf2c21248e5c4e746647ff623cad8cf0",
+  "subject_or_correlation_id": null,
+  "successor_org_state_sha256": "sha256:599b74d50260db57911d02c8c34ea7a1e8ecab8ef259cd71f970d5934e6b0ace"
+}
