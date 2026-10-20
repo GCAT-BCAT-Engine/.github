@@ -1,0 +1,38 @@
+{
+  "authority_effect": "NONE",
+  "boundary_evidence": {
+    "communication_id": "intr-path-v1:GCAT-BCAT-Engine->StegGhost",
+    "destination_organization": "StegGhost",
+    "disposition": "ALLOW",
+    "operation": "INTR_MESH_PATH_TRANSFER",
+    "path_id": "GCAT-BCAT-Engine->StegGhost:intr-destination",
+    "profile_id": "intr-mesh-path-transfer",
+    "repository": "GCAT-BCAT-Engine/.github",
+    "transfer_commit": "620a5ccbfc26463afe829f64dc6cf76ce85477ac"
+  },
+  "canonical_state_transition_receipt_sha256": null,
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "derived_from_clock": false,
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 0,
+    "progression_dependency": "OSCILLATOR_ONLY"
+  },
+  "org_transition_class": "REPO_STATE_PROPAGATION",
+  "organization": "GCAT-BCAT-Engine",
+  "predecessor_org_state_sha256": "sha256:94cbbd20f91891a727186b34b6538608b5a91ff3ad98e2774c624ba818b11d66",
+  "previous_receipt_sha256": "sha256:9a7c649f6a9ff104e8580cd4b06b6c5a55541017d3bdeb34bf872e862259110e",
+  "receipt_sha256": "sha256:81dae0d720c7e6213f8f4626adf3c16c431146c23b8d91add22d1cb83dc26166",
+  "repo_receipt_sha256": "sha256:0686705856256506efb43311dfab3f4454dff395ef56aef47f5ec7008756092e",
+  "repo_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->StegGhost:intr-destination@intr-path-v1:GCAT-BCAT-Engine->StegGhost",
+  "schema": "stegverse.organization-transition-receipt/v1",
+  "source_receipt_schema": "stegverse.repo-transition-receipt/v1",
+  "source_repository": "GCAT-BCAT-Engine/.github",
+  "source_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->StegGhost:intr-destination@intr-path-v1:GCAT-BCAT-Engine->StegGhost",
+  "source_transition_sha256": "sha256:0686705856256506efb43311dfab3f4454dff395ef56aef47f5ec7008756092e",
+  "subject_or_correlation_id": null,
+  "successor_org_state_sha256": "sha256:955a2b9ab4fe6604833dbbb20d1b2e0c6406b916643cece061ca9bd6dfb81694"
+}
