@@ -1,0 +1,45 @@
+{
+  "authority_effect": "NONE",
+  "evidence": {
+    "capability": "intr-destination",
+    "communication_id": "intr-path-v1:GCAT-BCAT-Engine->SV-LLM",
+    "destination_address": "sv-llm.intr-destination",
+    "destination_organization": "SV-LLM",
+    "disposition": "ALLOW",
+    "merge_transfer_organization_receipt_sha256": "sha256:1820247d20084e97c350fa83dbd9a5c8ddf0ce6f5f6240de14c8831648c24d85",
+    "message": {
+      "body": {
+        "path_id": "GCAT-BCAT-Engine->SV-LLM:intr-destination",
+        "schema": "stegverse.org-intr-destination-diagnostic/v1",
+        "transfer_commit": "620a5ccbfc26463afe829f64dc6cf76ce85477ac"
+      },
+      "communication_id": "intr-path-v1:GCAT-BCAT-Engine->SV-LLM",
+      "message_class": "ecosystem.communication"
+    },
+    "message_sha256": "sha256:4ee2a176330dc4314f73c77b52e141999703e0148bace8592b8ee66026fb0a7d",
+    "path_id": "GCAT-BCAT-Engine->SV-LLM:intr-destination",
+    "payload_sha256": "sha256:8889206060f205abbf1dda53e15efca87f9efe2bc1ab9983fcbde0ccee12e59a",
+    "repository": "GCAT-BCAT-Engine/.github",
+    "schema": "stegverse.intr-path-transfer-evidence/v1",
+    "source_organization": "GCAT-BCAT-Engine",
+    "transfer_commit": "620a5ccbfc26463afe829f64dc6cf76ce85477ac"
+  },
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "derived_from_clock": false,
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 0,
+    "progression_dependency": "OSCILLATOR_ONLY"
+  },
+  "predecessor_state_sha256": "sha256:8889206060f205abbf1dda53e15efca87f9efe2bc1ab9983fcbde0ccee12e59a",
+  "previous_receipt_sha256": "sha256:722797b8ddbf47d16c1311ee9a0595d95a215df12086bfd54663964e8cf4ec66",
+  "receipt_sha256": "sha256:3a9e9d385b2f6dde3769045a9f9cf8ab29f1b4f871e7e73604465b8a9f519c39",
+  "repository": "GCAT-BCAT-Engine/.github",
+  "schema": "stegverse.repo-transition-receipt/v1",
+  "successor_state_sha256": "sha256:8fd70003d1c2b9c721f12270905cbd9cbc9c1569340392c8b94700a62619d41e",
+  "transition_class": "INTR_MESH_PATH_TRANSFER",
+  "transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->SV-LLM:intr-destination@intr-path-v1:GCAT-BCAT-Engine->SV-LLM"
+}
