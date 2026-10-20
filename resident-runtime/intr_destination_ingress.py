@@ -75,6 +75,10 @@ def _module(name: str, relative: str):
 
 
 ledger = _module("dual_ledger", "resident-runtime/dual_ledger.py")
+#: The two writers dual_ledger appends through, named as the other organizations'
+#: ingress names them (merge_transfer, intr_path_transfer, ledger_gitstore bind these).
+repository_ledger = ledger.emit
+organization_ledger = ledger.aggregate
 
 
 def canon(value: Any) -> bytes:
@@ -184,9 +188,36 @@ def _result(evidence: Mapping[str, Any], appended: Mapping[str, Any] | None, *,
     return result
 
 
+_LEDGER_GITSTORE: Any = None
+
+
+def _two_level_atomic():
+    """resident-runtime/ledger_gitstore.py two_level_atomic: both halves' locations are resolved and
+    checked before either is written, and a failure after the repository half rolls its ref back."""
+    global _LEDGER_GITSTORE
+    if _LEDGER_GITSTORE is None:
+        _LEDGER_GITSTORE = _module("ledger_gitstore_for_intr_destination_ingress", "resident-runtime/ledger_gitstore.py")
+    return _LEDGER_GITSTORE.two_level_atomic(ROOT, surface=_LEDGER_GITSTORE.BoundSurface(emit=ledger.emit, aggregate=ledger.aggregate, dual=ledger))
+
+
 def _append(transition_class: str, packet_id: str, evidence: Mapping[str, Any],
-            hb_epoch: int | None) -> tuple[dict[str, Any], bool]:
-    """Append at both levels. A replay of the same packet returns the recorded pair."""
+            hb_epoch: int | None, *, operation: str = OPERATION_ID, profile_id: str = PROFILE_ID,
+            boundary_extra: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
+    """Append at both levels, all or nothing (see _two_level_atomic); a refusal of either
+    location raises ledger_gitstore.TwoLevelAppendRefused (a ValueError) before any write."""
+    with _two_level_atomic():
+        return _append_halves(transition_class, packet_id, evidence, hb_epoch, operation=operation,
+                              profile_id=profile_id, boundary_extra=boundary_extra)
+
+
+def _append_halves(transition_class: str, packet_id: str, evidence: Mapping[str, Any],
+                   hb_epoch: int | None, *, operation: str = OPERATION_ID, profile_id: str = PROFILE_ID,
+                   boundary_extra: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
+    """Append at both levels. A replay of the same packet returns the recorded pair.
+
+    ``operation``, ``profile_id`` and ``boundary_extra`` name another operation on
+    the same two-level append (resident-runtime/ledger_gitstore.py, the InTr path
+    transfer); their defaults are this ingress, so its receipts are unchanged."""
     predecessor = evidence["payload_sha256"]
     successor = sha({"disposition": evidence["disposition"], "packet_id": packet_id,
                      "communication_id": evidence.get("communication_id"),
@@ -200,9 +231,9 @@ def _append(transition_class: str, packet_id: str, evidence: Mapping[str, Any],
     epoch = repository_receipt["hb_reference"]["epoch"]
     organization_receipt = ledger.append_organization(
         repository_receipt, "REPO_STATE_PROPAGATION", predecessor, successor,
-        {"operation": OPERATION_ID, "profile_id": PROFILE_ID,
+        {"operation": operation, "profile_id": profile_id,
          "disposition": evidence["disposition"],
-         "communication_id": evidence.get("communication_id")},
+         "communication_id": evidence.get("communication_id"), **dict(boundary_extra or {})},
         "NONE", hb_epoch=epoch, idempotent=True)
     return ({"repository_receipt": repository_receipt,
              "organization_receipt": organization_receipt}, prior is not None)

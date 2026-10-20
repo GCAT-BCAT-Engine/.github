@@ -9,7 +9,10 @@ name: Organization Ledger Main Merge Transfer
 #
 # Each merge gets one repository receipt and one organization receipt through
 # this checkout's own two-level append, bound by
-# resident-runtime/merge_transfer_gitstore.py (WriterSurface), operation
+# resident-runtime/merge_transfer_gitstore.py (WriterSurface) and run all or
+# nothing by resident-runtime/ledger_gitstore.py merge-transfer-append (both
+# ledger locations checked before either half; a failure after the repository
+# half compare-and-swaps the ref back), operation
 # ORGANIZATION_MAIN_MERGE_TRANSFER, at the supplied epoch carried by the
 # ledger head (no clock). The transfer is VERIFIED only by
 # merge_transfer_gitstore.py verify (dual mode: the repository chain and the
@@ -71,7 +74,7 @@ jobs:
           export STEGVERSE_ORG_LEDGER_ROOT="git+$GITHUB_WORKSPACE#$LEDGER_REF"
           export STEGVERSE_ORG_LEDGER_GIT_DIR="$GITHUB_WORKSPACE/.git"
           export STEGVERSE_REPO_LEDGER_ROOT="git+$GITHUB_WORKSPACE#$LEDGER_REF:$REPO_LEDGER_NAMESPACE"
-          python3 resident-runtime/merge_transfer_gitstore.py append --commits-file "$RUNNER_TEMP/results/commits.txt" \
+          python3 resident-runtime/ledger_gitstore.py merge-transfer-append --commits-file "$RUNNER_TEMP/results/commits.txt" \
             --out "$RUNNER_TEMP/results/append.json"
 
       - name: Publish the ledger ref (fast-forward only)
