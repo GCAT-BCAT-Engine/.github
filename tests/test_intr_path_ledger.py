@@ -7,7 +7,7 @@ organization binds merge_transfer.py, unchanged.
 
 The git-store tests here use a contract whose pin also names this organization, and Lane D's modules as pinned
 byte copies in a checkout layout (tests/fixtures/intr-path-ledger/gitstore-checkout/resident-runtime/:
-ledger_gitstore.py sha256 258e1cf5..., merge_transfer_gitstore.py sha256 bf9f1c15...), so the real
+ledger_gitstore.py sha256 7700ab52..., merge_transfer_gitstore.py sha256 bf9f1c15...), so the real
 ledger_gitstore.append runs on this organization's own writer surface over temporary ledgers at the pinned tip.
 Every receipt written is NOT LEDGERED and NOT AUTHENTIC.
 """
@@ -110,7 +110,7 @@ class Selection(unittest.TestCase):
             self.assertEqual((pin["path"], pin["mode"]), ("resident-runtime/merge_transfer_gitstore.py", "dual"))
             self.assertEqual(pin["ledger_module"]["path"], "resident-runtime/ledger_gitstore.py")
             self.assertEqual(pin["ledger_module"]["sha256"],
-                             "sha256:258e1cf555d8080a3174ac1962dff2d735ccbb1caa01a4966c1bddd3e2e09241")
+                             "sha256:7700ab529b6e0c6bcde99bd02abdbe8558649a1568818a37c84d2e6bc8072291")
             chosen = pl.binding(ROOT, organization=org, module_root=CHECKOUT)
             self.assertEqual((chosen.kind, chosen.mode, chosen.verifier, chosen.writer_module),
                              ("MERGE_TRANSFER_GITSTORE", "dual", "resident-runtime/merge_transfer_gitstore.py verify",
@@ -231,7 +231,7 @@ class GitstoreBackend(unittest.TestCase):
 
 
 class TwoLevelPreflight(unittest.TestCase):
-    """ledger_gitstore.py (258e1cf5) checks both halves' locations before either is written, and rolls back by
+    """ledger_gitstore.py (7700ab52) checks both halves' locations before either is written, and rolls back by
     compare-and-swap. Its refusals reach the path results with six fields, and both halves' tips stay where they
     were (in this layout the repository chain lives on the organization ledger ref, so every ref and every
     document of the temporary ledger is compared)."""
