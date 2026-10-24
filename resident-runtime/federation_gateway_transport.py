@@ -2,6 +2,7 @@
 """Outbound-only Service Gateway transport for organization federation."""
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -141,45 +142,76 @@ def _object_members(text: str) -> dict[str, str]:
         raise ValueError("',' or '}' expected")
 
 
+FRAME_HANDLE_FIELDS = ("packet_id", "frame_sha256")
+
+
+def _raw_sha256(raw: str | None) -> str:
+    """The digest of a frame member's raw bytes: an acknowledgement handle for any frame."""
+    return "sha256:" + hashlib.sha256((raw or "").encode("utf-8")).hexdigest()
+
+
+def _readable_ids(raw: str | None) -> dict[str, str]:
+    """The frame's own top-level packet_id and frame_sha256, where each reads as a non-empty string."""
+    try:
+        members = _object_members(raw or "")
+    except ValueError:
+        return {}
+    ids = {}
+    for name in FRAME_HANDLE_FIELDS:
+        try:
+            value = json.loads(members[name])
+        except (*K.JSON_DOCUMENT_ERRORS, KeyError):
+            continue
+        if isinstance(value, str) and value:
+            ids[name] = value
+    return ids
+
+
 def read_fetch_reply(payload: bytes) -> dict[str, Any]:
     """A gateway fetch reply, with the envelope read apart from the frame it carries.
 
-    A frame that cannot be parsed (nested past the parser's depth, or not a
-    document this boundary can use) inside a readable envelope is returned
-    as `unusable_frame`: its `packet_id` and `frame_sha256`, read from the
-    frame's own top-level members, so the frame can be acknowledged BLOCKED
-    and the gateway moves on to the next one. Only an envelope that cannot
-    be read is a FederationGatewayTransportError.
+    Every frame offered in a readable envelope carries `frame_raw_sha256`, the
+    digest of the frame member's raw bytes, so it can always be acknowledged.
+    A frame this boundary cannot use (not an object, without a string
+    `packet_id` and `frame_sha256`, or nested past the parser's depth) is
+    returned as `unusable_frame`, with that digest and whichever ids read, so
+    it is acknowledged BLOCKED and the gateway moves on to the next one. Only
+    an envelope that cannot be read is a FederationGatewayTransportError.
     """
     try:
         text = payload.decode("utf-8")
     except UnicodeError as exc:
         raise FederationGatewayTransportError("gateway response is not UTF-8") from exc
     try:
-        reply = json.loads(text)
-    except K.JSON_DOCUMENT_ERRORS as whole:
-        try:
-            envelope = _object_members(text)
-            reply = {name: json.loads(raw) for name, raw in envelope.items() if name != "frame"}
-            frame_members = _object_members(envelope["frame"])
-            handle = {name: json.loads(frame_members[name]) for name in ("packet_id", "frame_sha256")}
-        except (*K.JSON_DOCUMENT_ERRORS, KeyError) as exc:
-            raise FederationGatewayTransportError("gateway response is not a readable document") from exc
-        if not all(isinstance(value, str) and value for value in handle.values()):
-            raise FederationGatewayTransportError("gateway frame names no acknowledgeable packet")
-        reply["unusable_frame"] = {**handle, "error": whole}
-        return reply
-    # A readable reply must still be an object, and a frame it offers must name
-    # the packet_id and frame_sha256 its acknowledgement carries; otherwise it is
-    # the same non-terminal transport failure as an unreadable one, never a raw
-    # exception out of the cycle.
-    if not isinstance(reply, dict):
+        reply, whole = json.loads(text), None
+    except K.JSON_DOCUMENT_ERRORS as exc:
+        reply, whole = None, exc
+    if reply is not None and not isinstance(reply, dict):
         raise FederationGatewayTransportError("gateway response is not a JSON object")
-    if reply.get("state") == "FRAME_AVAILABLE":
-        frame = reply.get("frame")
-        if not isinstance(frame, dict) or not all(
-                isinstance(frame.get(name), str) and frame.get(name) for name in ("packet_id", "frame_sha256")):
-            raise FederationGatewayTransportError("gateway frame names no acknowledgeable packet")
+    if reply is not None and reply.get("state") != "FRAME_AVAILABLE":
+        return reply
+    try:
+        envelope = _object_members(text)
+        if reply is None:
+            reply = {name: json.loads(raw) for name, raw in envelope.items() if name != "frame"}
+    except (*K.JSON_DOCUMENT_ERRORS, KeyError) as exc:
+        raise FederationGatewayTransportError("gateway response is not a readable document") from exc
+    raw = envelope.get("frame")
+    reply["frame_raw_sha256"] = _raw_sha256(raw)
+    frame = reply.get("frame")
+    if whole is None and isinstance(frame, dict) and all(
+            isinstance(frame.get(name), str) and frame.get(name) for name in FRAME_HANDLE_FIELDS):
+        return reply
+    if whole is None:
+        if raw is None:
+            whole = TypeError("the gateway reply offers a frame but carries none")
+        elif not isinstance(frame, dict):
+            whole = TypeError("the gateway frame is a " + type(frame).__name__ + ", not a JSON object")
+        else:
+            whole = TypeError("the gateway frame names no string packet_id and frame_sha256")
+    reply.pop("frame", None)
+    reply["unusable_frame"] = {**{name: None for name in FRAME_HANDLE_FIELDS}, **_readable_ids(raw),
+                               "frame_raw_sha256": reply["frame_raw_sha256"], "error": whole}
     return reply
 
 
@@ -209,18 +241,23 @@ GATEWAY_EPOCH_RETRY_ENTRYPOINT = "resident-runtime/federation_gateway_transport.
 
 
 def acknowledge_frame(organization: str, frame: dict[str, Any], state: str, *,
-                      hb_epoch: Any = None, refusal: dict[str, Any] | None = None) -> dict[str, Any]:
+                      hb_epoch: Any = None, refusal: dict[str, Any] | None = None,
+                      frame_raw_sha256: str | None = None) -> dict[str, Any]:
     heartbeat = K.supplied_hb_reference(hb_epoch, retry_entrypoint=GATEWAY_EPOCH_RETRY_ENTRYPOINT)
     ack = {
         "schema": "stegverse.org-federation-rendezvous.ack/v1",
         "organization": organization,
-        "packet_id": frame["packet_id"],
-        "frame_sha256": frame["frame_sha256"],
+        "packet_id": frame.get("packet_id"),
+        "frame_sha256": frame.get("frame_sha256"),
         "state": state,
         "hb_reference": heartbeat,
         "gateway_execution_authority": "NONE",
         "authority_effect": "NONE_OBSERVATION_ONLY",
     }
+    if frame_raw_sha256 is not None:
+        # The digest of the frame's raw bytes: the handle that names any offered
+        # frame, one with no readable packet_id or frame_sha256 included.
+        ack["frame_raw_sha256"] = frame_raw_sha256
     if refusal is not None:
         ack["refusal"] = dict(refusal)
     return _json_request(
@@ -413,12 +450,14 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
     unusable = fetched.get("unusable_frame")
     if unusable is not None:
         # The frame's own fault, read apart from a readable envelope: it is
-        # terminal and acknowledged BLOCKED, so the gateway drops it and the
-        # next frame is offered. It is never ingested.
+        # terminal and acknowledged BLOCKED by its raw-bytes digest and any ids
+        # that read, so the gateway drops it and the next frame is offered. It
+        # is never ingested.
         frame = {"packet_id": unusable["packet_id"], "frame_sha256": unusable["frame_sha256"]}
         result = K.quarantine_result(frame, K.frame_failure_refusal(unusable["error"]))
         try:
-            ack = acknowledge_frame(organization, frame, "BLOCKED", hb_epoch=ack_epoch, refusal=result["refusal"])
+            ack = acknowledge_frame(organization, frame, "BLOCKED", hb_epoch=ack_epoch, refusal=result["refusal"],
+                                    frame_raw_sha256=unusable["frame_raw_sha256"])
         except (OSError, FederationGatewayTransportError) as exc:
             return _deferred_cycle(organization, frame, exc)
         return {
@@ -428,6 +467,7 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
             "refusal": result["refusal"],
             "packet_id": frame["packet_id"],
             "frame_sha256": frame["frame_sha256"],
+            "frame_raw_sha256": unusable["frame_raw_sha256"],
             "frames_consumed": 0,
             "responses_emitted": 0,
             "response_frame_sha256": None,
@@ -476,7 +516,7 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
     ack_state = "CONSUMED" if result.get("status") == "CONSUMED" else "BLOCKED"
     try:
         ack = acknowledge_frame(organization, frame, ack_state, hb_epoch=ack_epoch,
-                                refusal=result.get("refusal"))
+                                refusal=result.get("refusal"), frame_raw_sha256=fetched.get("frame_raw_sha256"))
     except (OSError, FederationGatewayTransportError) as exc:
         # The ack is this boundary's own write: the frame stays pending, and the
         # retried request reuses the response it already submitted.
@@ -488,6 +528,7 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
         "refusal": result.get("refusal"),
         "packet_id": frame["packet_id"],
         "frame_sha256": frame["frame_sha256"],
+        "frame_raw_sha256": fetched.get("frame_raw_sha256"),
         "frames_consumed": 1 if ack_state == "CONSUMED" else 0,
         "responses_emitted": response_emitted,
         "response_frame_sha256": response_ref,
