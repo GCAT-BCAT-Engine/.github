@@ -19,7 +19,20 @@ def main(argv:list[str]|None=None)->int:
     # HB_EPOCH unset is NOT_SUPPLIED; set, even to "", it is read by the rule.
     ap.add_argument("--hb-epoch",default=os.environ.get("HB_EPOCH"),
                     help="heartbeat epoch, ASCII digits >= 32; the cycle refuses when absent or invalid")
+    ap.add_argument("--committed-request",default=None,
+                    help="PATH=sha256:<hex>: the committed cycle request that triggered this run")
     args=ap.parse_args(argv)
+    committed_request=None
+    if args.committed_request is not None:
+        path,_,digest=args.committed_request.partition("=")
+        if (not path or not digest.startswith("sha256:") or len(digest)!=71
+                or any(c not in "0123456789abcdef" for c in digest[7:])):
+            print(json.dumps(K.input_refusal("--committed-request","not PATH=sha256:<64 hex>",
+                                             retry_entrypoint=EPOCH_RETRY_ENTRYPOINT),sort_keys=True))
+            return 1
+        # The committed request's path and digest, recorded in the cycle record
+        # (the COMMITTED_REQUEST rule, (b)).
+        committed_request={"path":path,"sha256":digest,"hb_epoch_source":"COMMITTED_REQUEST"}
     try:
         heartbeat=K.supplied_hb_reference(args.hb_epoch,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
         if os.getenv("STEGVERSE_ORG_FEDERATION_GATEWAY_URL","").strip():
@@ -71,6 +84,8 @@ def main(argv:list[str]|None=None)->int:
             raise
         print(json.dumps(refusal,sort_keys=True))
         return 1
+    if committed_request is not None:
+        receipt["committed_request"]=committed_request
     out=ROOT/"resident-runtime"/"federation"/"latest-cycle.json"
     try:
         # Whole or not at all; every frame's own outcome is already durable on

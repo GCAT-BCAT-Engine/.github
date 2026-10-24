@@ -22,8 +22,9 @@ does not claim StegOS already named it.
 
 ``self_close`` builds a diagnostic for this organization's own
 ``intr-destination`` and calls ``receive``. Both ledger levels append through
-the repository emitter and the organization aggregator. A workflow_dispatch
-run is what publishes those receipts on ``refs/stegverse/organization-ledger``.
+the repository emitter and the organization aggregator. A push to main of the
+committed self-closure packet (organization-ledger-transition.yml) is what
+publishes those receipts on ``refs/stegverse/organization-ledger``.
 
 Authority and time are constraint variables. The address did not select a
 processor. The disposition is transition evidence only.

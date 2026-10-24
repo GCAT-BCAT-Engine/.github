@@ -1794,7 +1794,9 @@ class ManifestEpochBindingTests(unittest.TestCase):
     """B-P36n: every epoch-requiring entrypoint the activation manifest names declares a binding."""
 
     MANIFEST = ROOT / "resident-runtime/activation-manifest.json"
-    SOURCES = {"dispatch_input", "CARRIED:ORGANIZATION_LEDGER_HEAD"}
+    # B-P40 (R-DISPATCH 19:25Z): a manual dispatch input is no source; an epoch
+    # comes from a committed request or the carried ledger head.
+    SOURCES = {"committed_request", "CARRIED:ORGANIZATION_LEDGER_HEAD"}
 
     def declared(self):
         manifest = json.loads(self.MANIFEST.read_text(encoding="utf-8"))
@@ -2047,31 +2049,48 @@ class InTreeDispatcherTests(CopiedRepository):
     def bindings(self):
         return json.loads(self.MANIFEST.read_text(encoding="utf-8"))["epoch_bindings"]
 
+    REQUEST = ".stegverse/resident-federation/cycle-request.json"
+
     def test_every_binding_names_an_in_tree_dispatcher_that_invokes_it_with_the_epoch(self):
+        """B-P40 (R-DISPATCH 19:25Z): the dispatcher is triggered only by a push to main of its
+        committed request; the epoch is read from that request alone, gated by the shared rule."""
         for entrypoint, binding in self.bindings().items():
             dispatcher = ROOT / binding["dispatcher"]
             self.assertTrue(dispatcher.is_file(), binding["dispatcher"])
             self.assertEqual(dispatcher.parent, ROOT / ".github/workflows")
             self.assertEqual(binding["dispatcher_authority_effect"], "NONE")
+            self.assertEqual((binding["hb_epoch"]["from"], binding["hb_epoch"]["request"]),
+                             ("committed_request", self.REQUEST))
             text = dispatcher.read_text(encoding="utf-8")
-            self.assertEqual(_workflow_triggers(text), ["workflow_dispatch"])
-            self.assertRegex(text, r"hb_epoch:\n\s+description: [^\n]+\n\s+required: true")
-            self.assertNotIn("default:", text.split("jobs:")[0])
+            self.assertEqual(_workflow_triggers(text), ["push"])
+            self.assertIn("branches: [main]\n    paths:\n      - '" + self.REQUEST + "'\n", text)
+            self.assertNotIn("inputs:", text)
             invocation = "python " + entrypoint + " "
             invoking = [job for job in _workflow_jobs(text).values() if invocation in job]
             self.assertTrue(invoking, entrypoint + " is not invoked by " + binding["dispatcher"])
             for job in invoking:
-                gate, call = job.index("writer_epoch_refusal"), job.index(invocation)
+                read, gate, call = (job.index("cycle_request.py --request"), job.index("writer_epoch_refusal"),
+                                    job.index(invocation))
+                self.assertLess(read, gate)
                 self.assertLess(gate, call)
                 self.assertIn(binding["hb_epoch"]["argument"] + ' "$HB_EPOCH"', job[call:].split("\n")[0])
+            cycle_call = next(line for line in text.splitlines() if "python resident-runtime/federation_cycle.py" in line)
+            self.assertIn('--committed-request "' + self.REQUEST + '=$CYCLE_REQUEST_SHA256"', cycle_call)
 
-    def run_dispatcher(self, hb_epoch):
+    def run_dispatcher(self, request):
+        """Run the dispatcher job's steps in order, as the runner would after a push of `request`."""
         dispatcher = ROOT / next(iter(self.bindings().values()))["dispatcher"]
         job, = _workflow_jobs(dispatcher.read_text(encoding="utf-8")).values()
-        environment = {**os.environ, "HB_EPOCH": hb_epoch,
-                       "STEGVERSE_ORG_FEDERATION_ROOT": str(self.mesh)}
+        target = self.copy / self.REQUEST
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(request if isinstance(request, str) else json.dumps(request), encoding="utf-8")
+        github_env = Path(self._work.name) / "github-env"
+        github_env.write_text("", encoding="utf-8")
         outputs = []
         for script in _run_blocks(job):
+            exported = dict(line.split("=", 1) for line in github_env.read_text(encoding="utf-8").splitlines() if line)
+            environment = {**os.environ, **exported, "GITHUB_ENV": str(github_env),
+                           "STEGVERSE_ORG_FEDERATION_ROOT": str(self.mesh)}
             run = subprocess.run(["bash", "-e", "-c", script], cwd=self.copy, env=environment,
                                  capture_output=True, text=True, check=False)
             outputs.append(run)
@@ -2079,53 +2098,73 @@ class InTreeDispatcherTests(CopiedRepository):
                 break
         return outputs
 
-    def test_the_dispatcher_passes_the_epoch_through(self):
+    def request(self, **fields):
+        return {"schema": "stegverse.resident-federation-cycle-request/v1", "request_id": "probe-cycle", **fields}
+
+    def test_the_dispatcher_passes_the_committed_epoch_through_and_records_the_request(self):
         services = {row["boundary_role"]: row["service_id"] for row in REGISTRY["services"]}
         self.publish(services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-dispatcher",
                                                           "message_class": "ecosystem.monitor.request",
                                                           "subject": "probe", "body": {}}, "probe-dispatcher")
-        gate, cycle, status = self.run_dispatcher("4096")
-        for run in (gate, cycle, status):
-            self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn("DISPATCH_HB_EPOCH=SUPPLIED", gate.stdout)
+        read, gate, cycle, status = self.run_dispatcher(self.request(hb_epoch=4096))
+        for run in (read, gate, cycle, status):
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("COMMITTED_REQUEST_HB_EPOCH=SUPPLIED", gate.stdout)
         record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
         self.assertEqual((record["heartbeat_reference"]["epoch"], record["frames_consumed"]), (4096, 1))
         self.assertIs(record["heartbeat_reference"]["derived_from_clock"], False)
+        digest = "sha256:" + hashlib.sha256((self.copy / self.REQUEST).read_bytes()).hexdigest()
+        self.assertEqual(record["committed_request"],
+                         {"path": self.REQUEST, "sha256": digest, "hb_epoch_source": "COMMITTED_REQUEST"})
+        self.assertEqual(record["transport"], "LOCAL_SPOOL_FALLBACK")
         self.assertEqual(json.loads(status.stdout)["heartbeat_reference"]["epoch"], 4096)
 
-    def test_the_dispatcher_refuses_an_empty_or_invalid_epoch_before_any_entrypoint(self):
-        for value, failure_code in (("", "HB_EPOCH_NOT_SUPPLIED"), ("+33", "HB_EPOCH_INVALID")):
-            runs = self.run_dispatcher(value)
-            self.assertEqual(len(runs), 1)
-            self.assertEqual(runs[0].returncode, 1)
-            self.assertEqual(json.loads(runs[0].stdout)["failure_code"], failure_code)
-        self.assertFalse((self.copy / "resident-runtime/federation/latest-cycle.json").exists())
+    def test_the_dispatcher_refuses_an_absent_or_invalid_request_epoch_before_any_entrypoint(self):
+        cases = ((self.request(), 2, "HB_EPOCH_NOT_SUPPLIED"),
+                 (self.request(hb_epoch=5), 2, "HB_EPOCH_INVALID"),
+                 (self.request(hb_epoch="33"), 1, "CYCLE_REQUEST_HB_EPOCH_INVALID"),
+                 (self.request(hb_epoch=4096, extra=1), 1, "CYCLE_REQUEST_SCHEMA_MISMATCH"),
+                 ("{not json", 1, "CYCLE_REQUEST_UNREADABLE"))
+        for request, steps, failure_code in cases:
+            with self.subTest(failure_code=failure_code):
+                runs = self.run_dispatcher(request)
+                self.assertEqual(len(runs), steps)
+                self.assertEqual(runs[-1].returncode, 1)
+                refusal = json.loads(runs[-1].stdout.splitlines()[-1])
+                self.assertEqual((refusal["disposition"], refusal["failure_code"]), ("FAIL_CLOSED", failure_code))
+                self.assertFalse((self.copy / "resident-runtime/federation/latest-cycle.json").exists())
 
-    def test_no_trigger_but_a_gated_dispatch_invokes_an_epoch_requiring_entrypoint(self):
+    def test_the_cycle_refuses_a_malformed_committed_request_argument(self):
+        cycle = _module("federation_cycle_committed_request", "resident-runtime/federation_cycle.py")
+        with mock.patch("builtins.print") as printed:
+            self.assertEqual(cycle.main(["--hb-epoch", "4096", "--committed-request", "x=sha256:00"]), 1)
+        refusal = json.loads(printed.call_args.args[0])
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("CLI_INPUT_INVALID", True))
+
+    def test_no_trigger_but_a_gated_committed_request_invokes_an_epoch_requiring_entrypoint(self):
         scripts = _epoch_requiring_scripts()
         self.assertTrue({"resident-runtime/federation_cycle.py", "resident-runtime/ecosystem_control.py",
                          "resident-runtime/intr_destination_ingress.py"} <= scripts)
         for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
             text = workflow.read_text(encoding="utf-8")
-            dispatch_only = _workflow_triggers(text) == ["workflow_dispatch"]
-            # The 09:20Z COMMITTED_REQUEST route: a push writer triggered only by
-            # its committed request file, whose epoch comes from that file alone.
-            committed_request = (_workflow_triggers(text) == ["push"]
-                                 and "paths:\n      - '.stegverse/intr-destination/self-closure-packet.json'\n" in text)
+            # The 09:20Z COMMITTED_REQUEST route, the only one (B-P40): a push
+            # writer triggered only by its committed request file, whose epoch
+            # comes from that file alone.
+            readers = {"'.stegverse/intr-destination/self-closure-packet.json'": "self_closure_packet.py --packet",
+                       "'.stegverse/resident-federation/cycle-request.json'": "cycle_request.py --request"}
+            reader = next((read for path, read in readers.items()
+                           if _workflow_triggers(text) == ["push"] and "paths:\n      - " + path + "\n" in text), None)
             for name, job in _workflow_jobs(text).items():
                 for call in re.finditer(r"python3? (\S+\.py)", job):
                     if call.group(1) not in scripts:
                         continue
                     where = workflow.name + ":" + name + ":" + call.group(1)
                     before = job[:call.start()]
-                    if committed_request:
-                        self.assertIn("self_closure_packet.py --packet", before, where)
-                        self.assertLess(before.index("self_closure_packet.py --packet"),
-                                        before.index("writer_epoch_refusal"), where)
-                        self.assertIn("--committed-request", job, where)
-                    else:
-                        self.assertTrue(dispatch_only or "if: github.event_name == 'workflow_dispatch'" in job, where)
+                    self.assertIsNotNone(reader, where + " runs an epoch-requiring entrypoint off a committed request")
+                    self.assertIn(reader, before, where)
                     self.assertIn("writer_epoch_refusal", before, where)
+                    self.assertLess(before.index(reader), before.index("writer_epoch_refusal"), where)
+                    self.assertIn("--committed-request", job, where)
                     self.assertIn("--hb-epoch", job, where)
 
 
