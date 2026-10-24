@@ -533,6 +533,61 @@ class GitSourceLedgerTests(LedgerCase):
             consumed = self.aggregate_cli(path)
         self.assertEqual(consumed.returncode, 0, consumed.stdout + consumed.stderr)
 
+    def test_row_8_a_lone_override_of_either_ledger_root_is_refused(self):
+        """Lead 21:13Z (paired-override form): overriding only one of the two roots never verifies a
+        source. Only the repository root moved is CALLER_CHOSEN_SOURCE_LEDGER_REJECTED; only the
+        organization root moved derives its source ledger from that root, which holds no genuine
+        receipt. The real ledger's ref is unmoved either way."""
+        work = Path(self._work.name)
+        genuine_result, _ = self.self_close()
+        genuine = self.receipt(os.environ["STEGVERSE_REPO_LEDGER_ROOT"], genuine_result["repository_receipt_sha256"])
+        other = work / "other.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(other)], check=True)
+        path = work / "source.json"
+        path.write_text(json.dumps(genuine))
+        tip = self.tip()
+        cases = {"only the repository root": ({"STEGVERSE_REPO_LEDGER_ROOT":
+                                                "git+" + str(other) + "#" + LEDGER_REF + ":" + NAMESPACE},
+                                               "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED"),
+                 "only the organization root": ({"STEGVERSE_ORG_LEDGER_ROOT": "git+" + str(other) + "#" + LEDGER_REF},
+                                                "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED")}
+        for case, (override, code) in cases.items():
+            with self.subTest(case=case), mock.patch.dict(os.environ, override):
+                self.assert_refused_json(self.aggregate_cli(path), code)
+        environment = {key: value for key, value in os.environ.items() if key != "STEGVERSE_REPO_LEDGER_ROOT"}
+        environment["STEGVERSE_ORG_LEDGER_ROOT"] = "git+" + str(other) + "#" + LEDGER_REF
+        with self.subTest(case="only the organization root, no repository root"), \
+                mock.patch.dict(os.environ, environment, clear=True):
+            self.assert_refused_json(self.aggregate_cli(path), "SOURCE_RECEIPT_NOT_ON_LEDGER")
+        self.assertEqual(self.tip(), tip)
+
+    def test_row_8_no_request_field_or_argument_overrides_the_source_ledger(self):
+        """Lead 21:13Z probe (b): a request cannot name the source ledger. An argument naming one is
+        rejected before anything runs, and evidence naming one changes nothing: the receipt minted on
+        an attacker's ledger is still refused against the designated ledger."""
+        work = Path(self._work.name)
+        attacker = work / "attacker.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(attacker)], check=True)
+        attacker_repo = "git+" + str(attacker) + "#" + LEDGER_REF + ":" + NAMESPACE
+        with mock.patch.dict(os.environ, {"STEGVERSE_ORG_LEDGER_ROOT": "git+" + str(attacker) + "#" + LEDGER_REF,
+                                          "STEGVERSE_REPO_LEDGER_ROOT": attacker_repo}):
+            minted, _ = self.self_close("probe-request-override")
+        path = work / "source.json"
+        path.write_text(json.dumps(self.receipt(attacker_repo, minted["repository_receipt_sha256"])))
+        tip = self.tip()
+        for flag in ("--source-ledger", "--repo-ledger-root", "--repository-ledger"):
+            with self.subTest(argument=flag):
+                run = subprocess.run([sys.executable, str(ROOT / "resident-runtime/aggregate_repo_transition.py"),
+                                      "--repo-receipt", str(path), "--predecessor-org-state-sha256", "FROM_HEAD",
+                                      "--successor-org-state-sha256", "sha256:" + "f" * 64, "--hb-epoch", "4096",
+                                      flag, attacker_repo], env=dict(os.environ), capture_output=True, text=True)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertIn("unrecognized arguments", run.stderr)
+        for key in ("source_ledger", "repository_ledger_location", "STEGVERSE_REPO_LEDGER_ROOT"):
+            with self.subTest(evidence=key):
+                self.assert_refused_json(self.aggregate_cli(path, {key: attacker_repo}), "SOURCE_RECEIPT_NOT_ON_LEDGER")
+        self.assertEqual(self.tip(), tip)
+
     def test_row_8_the_designated_ledger_is_derived_from_the_contract_not_the_caller(self):
         """Lead 20:57Z: with no STEGVERSE_REPO_LEDGER_ROOT at all, the designated ledger is still the
         one verified against; an attacker receipt is refused and the genuine one consumed."""
@@ -715,6 +770,42 @@ class GitRefBindingTests(LedgerCase):
         mismatch = self.bind_cli(result_path, REQUEST + "=" + OTHER)
         self.assertEqual(json.loads(mismatch.stdout)["failure_code"], "COMMITTED_REQUEST_REPLAY_MISMATCH")
         self.assertEqual(self.tip(), before)
+
+
+    def test_the_binder_and_its_readback_pair_the_repository_ledger_with_the_organization_ledger(self):
+        """Lead 21:13Z condition 1, at the writer and the reader: a lone override of the repository
+        ledger is CALLER_CHOSEN_SOURCE_LEDGER_REJECTED in bind and in the readback, the ref is
+        unmoved, and the paired ledger still binds and reads back ALLOW."""
+        result, result_path = self.self_close("probe-git-pair")
+        other = Path(self._work.name) / "other.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(other)], check=True)
+        before = self.tip()
+        for override in ("git+" + str(other) + "#" + LEDGER_REF + ":" + NAMESPACE,
+                         "git+" + str(self.git_dir) + "#" + LEDGER_REF + ":repository-ledger/GCAT-BCAT-Engine/another"):
+            with self.subTest(override=override), mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT": override}):
+                run = self.bind_cli(result_path)
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                refusal = json.loads(run.stdout.splitlines()[-1])
+                self.assertEqual((refusal["failure_code"], refusal["terminal"]),
+                                 ("CALLER_CHOSEN_SOURCE_LEDGER_REJECTED", True))
+                self.assertEqual(self.tip(), before)
+        self.assertEqual(self.bind_cli(result_path).returncode, 0)
+        wrong = subprocess.run([sys.executable, str(ROOT / "resident-runtime/organization_ledger_readback.py"),
+                                "--location", "git+" + str(self.git_dir) + "#" + LEDGER_REF,
+                                "--ingress-result", str(result_path),
+                                "--repository-namespace", "repository-ledger/GCAT-BCAT-Engine/another",
+                                "--committed-request", REQUEST_ARG], capture_output=True, text=True)
+        self.assertEqual(wrong.returncode, 1, wrong.stdout + wrong.stderr)
+        self.assertEqual(json.loads(wrong.stdout)["disposition"], "FAIL_CLOSED")
+        org_store = store_module.open_store(store_module.parse_locator("git+" + str(self.git_dir) + "#" + LEDGER_REF))
+        for repo in ("git+" + str(other) + "#" + LEDGER_REF + ":" + NAMESPACE,
+                     "git+" + str(self.git_dir) + "#" + LEDGER_REF + ":repository-ledger/GCAT-BCAT-Engine/another"):
+            with self.subTest(reader=repo), self.assertRaises(binding.BindingRefused) as raised:
+                binding.verify(org_store=org_store, repo_store=store_module.open_store(store_module.parse_locator(repo)),
+                               expected=[(REQUEST_ARG, result["organization_receipt_sha256"])])
+            self.assertEqual(raised.exception.refusal["failure_code"], "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED")
+        read = self.readback(self.git_dir, result_path)
+        self.assertEqual(read.returncode, 0, read.stdout + read.stderr)
 
 
 if __name__ == "__main__":

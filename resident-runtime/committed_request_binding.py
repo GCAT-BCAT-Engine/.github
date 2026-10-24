@@ -205,6 +205,37 @@ def _organization_chain(org_store: Any) -> list[str]:
     return found
 
 
+CALLER_CHOSEN_SOURCE_LEDGER_REJECTED = "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED"
+LEDGER_ROOT_NOT_CONTRACT_DESIGNATED = "LEDGER_ROOT_NOT_CONTRACT_DESIGNATED"
+
+
+def designated_repository_store(org_store: Any, repo_store: Any = None) -> Any:
+    """The repository ledger paired with `org_store` (lead 21:13Z, paired-override form).
+
+    On a git organization ledger it is contract.json's designated ref and namespace in the
+    same repository, by realpath; a caller-chosen repository store that is not that ledger is
+    CALLER_CHOSEN_SOURCE_LEDGER_REJECTED, and an organization ref other than the designated one
+    is LEDGER_ROOT_NOT_CONTRACT_DESIGNATED. A POSIX organization root (runner-temporary or
+    test) is paired with the repository root supplied beside it."""
+    if getattr(org_store, "kind", None) != "GIT_REF":
+        return repo_store
+    declared = json.loads((ROOT / ".stegverse/transition-ledger/contract.json").read_text()).get(
+        "repository_ledger_location") or {}
+    ref, namespace = declared.get("ref"), declared.get("namespace")
+    if not ref or not namespace or org_store.ref != ref:
+        raise _refuse(LEDGER_ROOT_NOT_CONTRACT_DESIGNATED, "THE_LEDGER_IS_THIS_REPOSITORYS_DESIGNATED_LEDGER",
+                      "the organization ledger ref " + str(org_store.ref) + " is not the designated " + str(ref),
+                      "use the ledger ref contract.json designates")
+    repository = os.path.realpath(org_store.repository)
+    if repo_store is not None and (getattr(repo_store, "kind", None) != "GIT_REF"
+                                   or os.path.realpath(repo_store.repository) != repository
+                                   or repo_store.ref != ref or repo_store.namespace != namespace):
+        raise _refuse(CALLER_CHOSEN_SOURCE_LEDGER_REJECTED, "THE_LEDGER_IS_THIS_REPOSITORYS_DESIGNATED_LEDGER",
+                      "the repository ledger supplied is not " + ref + ":" + namespace + " in " + repository,
+                      "drop the override; the repository ledger is derived from the organization ledger")
+    return S.GitLedgerStore(repository, ref, namespace)
+
+
 def stores(org_store: Any = None, repo_store: Any = None) -> tuple[Any, Any]:
     def supplied(variable: str) -> Any:
         value = os.environ.get(variable)
@@ -212,8 +243,13 @@ def stores(org_store: Any = None, repo_store: Any = None) -> tuple[Any, Any]:
             raise _refuse(BOUND_RECEIPT_UNREADABLE, "THE_LEDGER_LOCATIONS_ARE_SUPPLIED", variable + " is not set",
                           "supply " + variable + " as the materializer does")
         return S.open_store(S.parse_locator(value))
-    return (org_store or supplied("STEGVERSE_ORG_LEDGER_ROOT"),
-            repo_store or supplied("STEGVERSE_REPO_LEDGER_ROOT"))
+    org_store = org_store or supplied("STEGVERSE_ORG_LEDGER_ROOT")
+    if repo_store is None and getattr(org_store, "kind", None) == "GIT_REF":
+        value = os.environ.get("STEGVERSE_REPO_LEDGER_ROOT")
+        repo_store = S.open_store(S.parse_locator(value)) if value else None
+    else:
+        repo_store = repo_store or supplied("STEGVERSE_REPO_LEDGER_ROOT")
+    return org_store, designated_repository_store(org_store, repo_store)
 
 
 def preflight(org_store: Any = None) -> None:
