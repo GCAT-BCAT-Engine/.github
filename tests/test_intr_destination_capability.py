@@ -3842,6 +3842,29 @@ class DeepJsonFrameTests(CopiedRepository):
                       if (r.get("evidence") or {}).get("communication_id") == "probe-deep-neighbour"]
         self.assertEqual(len(repository), 1)
 
+    def test_every_seen_marker_records_the_raw_digest_of_its_frame_file(self):
+        """D5 (VALIDATOR V-P11 @bf35271, ruled in 20:04Z): a spool seen marker names its frame by
+        frame_raw_sha256, the sha256 of the frame file's raw bytes, for a consumed frame and for a
+        frame refused because it cannot be read (not JSON, nested past the parser's depth, or over
+        the size cap)."""
+        frames = self.mesh / "frames.d"
+        frames.mkdir(parents=True)
+        (frames / "0000-deep.json").write_text(DEEP_JSON, encoding="utf-8")
+        (frames / "0001-not-json.json").write_text("{not json", encoding="utf-8")
+        (frames / "0002-oversized.json").write_bytes(b" " * (kernel.MAX_CARRIER_FRAME_BYTES + 1))
+        self.publish(ADDRESS, diagnostic("probe-raw-digest"), "probe-raw-digest")
+        expected = {path.name: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+                    for path in frames.glob("*.json")}
+        record = self.run_cycle(self.cycle())
+        self.assertEqual((record["frames_consumed"], record["frames_refused"]), (1, 3))
+        markers = {marker["frame_name"]: marker for marker in self.markers()}
+        self.assertEqual(set(markers), set(expected))
+        for name, digest in expected.items():
+            with self.subTest(frame=name):
+                self.assertEqual(markers[name]["frame_raw_sha256"], digest)
+        consumed, = [marker for marker in markers.values() if marker["status"] == "CONSUMED"]
+        self.assertEqual(consumed["packet_id"], "probe-raw-digest")
+
 class CommittedRequestPushWriterTests(RedirectedLedgers):
     """The 09:20Z COMMITTED_REQUEST rule, (b): the push writer (organization-ledger-transition.yml
     close, triggered by a committed self-closure packet since main's PR #18 line) records the

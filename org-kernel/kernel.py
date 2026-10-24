@@ -623,7 +623,7 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "ADMISSION_SCHEMA","ADMISSION_FIELDS","ingest_or_quarantine","frame_failure_refusal",
          "recorded_response","response_collision_refusal","writer_fault_refusal","cli_refusal",
          "WRITER_IO_FAILED","WRITER_WRITE_FAILED","CLI_INPUT_INVALID","InputRefused","input_refusal",
-         "read_json_input","strict_json_loads","JSON_DOCUMENT_ERRORS","collision_refusal","LEDGER_RECEIPT_COLLISION","control_response_packet_id","request_binding",
+         "read_json_input","strict_json_loads","frame_file_raw_sha256","JSON_DOCUMENT_ERRORS","collision_refusal","LEDGER_RECEIPT_COLLISION","control_response_packet_id","request_binding",
          "RESPONSE_ID_COLLISION","ResponseIdCollision","RESPONDING_MESSAGE_CLASSES","write_json_atomic","write_once_json",
          "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED","FRAME_DISPATCH_IO_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
@@ -661,6 +661,9 @@ def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str
     for path in sorted(frames.glob("*.json")):
         if path.name in consumed:
             continue
+        # The digest of the file's raw bytes names any frame, one that cannot
+        # be read as a frame included; its seen marker records it (D5).
+        raw_sha256=frame_file_raw_sha256(path)
         try:
             if path.stat().st_size>MAX_CARRIER_FRAME_BYTES:
                 raise ValueError("carrier_frame_exceeds_size_cap_"+str(MAX_CARRIER_FRAME_BYTES))
@@ -673,11 +676,22 @@ def scan_addressed_frames(organization:str, *, root:Path|None=None, seen:set[str
             # file is guarded on its own and offered to a consuming cycle, which
             # quarantines it by name; it blocks no cycle.
             if include_unreadable:
-                out.append({"path":str(path),"frame":None,"load_error":exc})
+                out.append({"path":str(path),"frame":None,"load_error":exc,"frame_raw_sha256":raw_sha256})
             continue
         if frame.get("destination_org")==organization:
-            out.append({"path":str(path),"frame":frame})
+            out.append({"path":str(path),"frame":frame,"frame_raw_sha256":raw_sha256})
     return out
+
+def frame_file_raw_sha256(path:Path)->str|None:
+    """sha256 of a frame file's raw bytes, read in blocks so an oversized file is hashed too; None if unreadable."""
+    digest=hashlib.sha256()
+    try:
+        with open(path,"rb") as stream:
+            for block in iter(lambda:stream.read(1<<16),b""):
+                digest.update(block)
+    except OSError:
+        return None
+    return "sha256:"+digest.hexdigest()
 
 def build_packet(*, origin_org:str, origin_service:str, destination_org:str, destination_service:str,
                  payload:dict[str,Any], transition_reference:str="federation.v1",
@@ -1200,7 +1214,8 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
                     continue
         try:
             marker=mark_federation_frame_seen(repo_root,item["path"],
-                                              item["frame"] if isinstance(item["frame"],dict) else {},result)
+                                              item["frame"] if isinstance(item["frame"],dict) else {},result,
+                                              frame_raw_sha256=item.get("frame_raw_sha256"))
         except OSError as exc:
             # The marker is this boundary's own state: the frame stays pending,
             # and the next cycle reuses the response already published.
@@ -1332,7 +1347,8 @@ def federation_seen_frame_names(repo_root:Path)->set[str]:
             continue
     return names
 
-def mark_federation_frame_seen(repo_root:Path, frame_path:str, frame:dict[str,Any], result:dict[str,Any])->Path:
+def mark_federation_frame_seen(repo_root:Path, frame_path:str, frame:dict[str,Any], result:dict[str,Any], *,
+                               frame_raw_sha256:str|None=None)->Path:
     seen_dir=repo_root/"resident-runtime/federation/seen.d"
     seen_dir.mkdir(parents=True,exist_ok=True)
     frame_name=Path(frame_path).name
@@ -1340,6 +1356,7 @@ def mark_federation_frame_seen(repo_root:Path, frame_path:str, frame:dict[str,An
       "schema_version":"stegverse.federation-frame-consumption.v1",
       "frame_name":frame_name,
       "frame_sha256":frame.get("frame_sha256"),
+      "frame_raw_sha256":frame_raw_sha256,
       "packet_id":frame.get("packet_id"),
       "destination_org":frame.get("destination_org"),
       "status":result.get("status"),
