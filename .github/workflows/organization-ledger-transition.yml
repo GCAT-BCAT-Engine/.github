@@ -1,107 +1,30 @@
 name: Organization Ledger Transition
 
 # The published organization ledger is refs/stegverse/organization-ledger
-# (org-contract.json organization_ledger_ref). workflow_dispatch records an
+# (org-contract.json organization_ledger_ref). A push to main that changes
+# .stegverse/intr-destination/self-closure-packet.json (the committed state transition;
+# resident-runtime/self_closure_packet.py reads it) records an
 # intr-destination diagnostic self-closure on that ref, fast-forward pushes
 # it, and reads the receipts back from a fresh fetch.
 #
-# pull_request and push only exercise redirected stores. Those stores are not
-# the published ref, and the receipts they hold are not production receipts.
+# organization-ledger-transition-validation.yml (pull_request, and push to main
+# for its paths) only exercises redirected stores. Those stores are not the
+# published ref, and the receipts they hold are not production receipts.
+# Writer only, on push to main. Its pull_request and push checks run in
+# .github/workflows/organization-ledger-transition-validation.yml (read-only); no
+# pull_request event reaches this file, so no PR shows this job as skipped.
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - '.stegverse/transition-ledger/**'
-      - 'resident-runtime/ledger_store.py'
-      - 'resident-runtime/aggregate_repo_transition.py'
-      - 'resident-runtime/organization_ledger_readback.py'
-      - 'resident-runtime/dual_ledger.py'
-      - 'resident-runtime/intr_destination_ingress.py'
-      - 'org-kernel/kernel.py'
-      - 'data/organization-role-runtime-reality-deployment.json'
-      - 'tests/test_organization_ledger_stack.py'
-      - 'tests/test_intr_destination_capability.py'
-      - 'docs/ORGANIZATION_TRANSITION_LEDGER_MIRROR_HANDOFF.md'
-      - 'docs/TRANSITION_LEDGER_MIRROR_HANDOFF.md'
-      - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
-      - '.github/workflows/organization-ledger-transition.yml'
   push:
     branches: [main]
     paths:
-      - '.stegverse/transition-ledger/**'
-      - 'resident-runtime/ledger_store.py'
-      - 'resident-runtime/aggregate_repo_transition.py'
-      - 'resident-runtime/organization_ledger_readback.py'
-      - 'resident-runtime/dual_ledger.py'
-      - 'resident-runtime/intr_destination_ingress.py'
-      - 'org-kernel/kernel.py'
-      - 'data/organization-role-runtime-reality-deployment.json'
-      - 'tests/test_organization_ledger_stack.py'
-      - 'tests/test_intr_destination_capability.py'
-      - 'docs/ORGANIZATION_TRANSITION_LEDGER_MIRROR_HANDOFF.md'
-      - 'docs/TRANSITION_LEDGER_MIRROR_HANDOFF.md'
-      - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
-      - '.github/workflows/organization-ledger-transition.yml'
-  workflow_dispatch:
-    inputs:
-      communication_id:
-        description: 'communication_id the diagnostic self-closure records'
-        required: true
-      packet_id:
-        description: 'optional packet id; default intr-destination-self-closure:<communication_id>'
-        required: false
-        default: ''
-      hb_epoch:
-        description: 'required heartbeat epoch: ASCII digits, value >= 32; never derived from the clock'
-        required: true
+      - '.stegverse/intr-destination/self-closure-packet.json'
 
 permissions:
   contents: read
 
 jobs:
-  validate:
-    if: github.event_name != 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout organization boundary
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: The contract names the published ref
-        run: |
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          org = json.loads(Path(".stegverse/transition-ledger/org-contract.json").read_text())
-          repo = json.loads(Path(".stegverse/transition-ledger/contract.json").read_text())
-          assert org["organization_ledger_ref"] == "refs/stegverse/organization-ledger"
-          assert org["organization_ledger_repository"] == "GCAT-BCAT-Engine/.github"
-          assert "ORGANIZATION_LEDGER_ROOT" not in Path(".stegverse/transition-ledger/org-contract.json").read_text()
-          location = repo["repository_ledger_location"]
-          assert location["ref"] == org["organization_ledger_ref"]
-          assert location["repository"] == org["organization_ledger_repository"]
-          assert location["namespace"] == "repository-ledger/GCAT-BCAT-Engine/.github"
-          assert location["new_ledger_root"] is False
-          deployment = json.loads(Path("data/organization-role-runtime-reality-deployment.json").read_text())
-          assert deployment["reality_locus"] == org["organization_ledger_ref"]
-          print("ORGANIZATION_LEDGER_REF_BOUND=PASS")
-          PY
-
-      # Redirected roots only. This job does not fetch or push
-      # refs/stegverse/organization-ledger.
-      - name: Validate the ledger stack and the intr-destination capability
-        env:
-          STEGVERSE_REPO_LEDGER_ROOT: ${{ runner.temp }}/repo-ledger
-          STEGVERSE_ORG_LEDGER_ROOT: ${{ runner.temp }}/org-ledger
-        run: |
-          python -m unittest tests.test_organization_ledger_stack tests.test_intr_destination_capability -v
-          python org-kernel/tests/test_kernel.py
-          python org-runtime/runtime_boundary.py validate > boundary.json
-          python -c 'import json; report=json.load(open("boundary.json")); assert report["valid"] is True, report'
-
   close:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -116,14 +39,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The dispatch hb_epoch is checked by the kernel's shared rule before
-      # anything else runs. A workflow_dispatch string input cannot tell empty
-      # from absent, so "" is HB_EPOCH_NOT_SUPPLIED here; an invalid one is
-      # HB_EPOCH_INVALID. Either is the six-field writer_epoch_refusal,
-      # nothing is written, and no clock is read.
-      - name: Refuse an absent or invalid dispatch hb_epoch by the kernel's shared rule
-        env:
-          HB_EPOCH: ${{ github.event.inputs.hb_epoch }}
+      - name: Read the self-closure inputs from the pushed commit's packet
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python resident-runtime/self_closure_packet.py --packet .stegverse/intr-destination/self-closure-packet.json --github-env "$GITHUB_ENV"
+
+      # The committed request's hb_epoch is the only epoch this push writer uses
+      # (the 09:20Z COMMITTED_REQUEST rule). It is checked by the kernel's shared
+      # rule before anything is written or pushed: absent is HB_EPOCH_NOT_SUPPLIED,
+      # malformed is HB_EPOCH_INVALID, six-field; nothing is written or pushed, and
+      # no clock, ledger or ref is read for it.
+      - name: Refuse an absent or invalid committed-request hb_epoch by the kernel's shared rule
         run: |
           python - <<'PY'
           import importlib.util, json, os, sys
@@ -132,30 +59,18 @@ jobs:
           spec.loader.exec_module(kernel)
           refusal = kernel.writer_epoch_refusal(
               os.environ.get("HB_EPOCH") or None,
-              retry_entrypoint=".github/workflows/organization-ledger-transition.yml (workflow_dispatch hb_epoch)")
+              retry_entrypoint=".github/workflows/organization-ledger-transition.yml (.stegverse/intr-destination/self-closure-packet.json hb_epoch)")
           if refusal is not None:
               print(json.dumps(refusal, sort_keys=True))
               sys.exit(1)
-          print("DISPATCH_HB_EPOCH=SUPPLIED")
+          print("COMMITTED_REQUEST_HB_EPOCH=SUPPLIED")
           PY
 
-      - name: Validate dispatch inputs and the ledger contract
-        env:
-          COMMUNICATION_ID: ${{ github.event.inputs.communication_id }}
-          PACKET_ID: ${{ github.event.inputs.packet_id }}
+      - name: Validate the ledger contract
         run: |
           python - <<'PY'
-          import json, os, sys
+          import json
           from pathlib import Path
-          def printable(name, value, required):
-              if required and not value:
-                  print("FAIL_CLOSED: " + name + "_REQUIRED", file=sys.stderr)
-                  sys.exit(1)
-              if value and not all(32 <= ord(character) <= 126 for character in value):
-                  print("FAIL_CLOSED: " + name + "_NOT_PRINTABLE", file=sys.stderr)
-                  sys.exit(1)
-          printable("COMMUNICATION_ID", os.environ.get("COMMUNICATION_ID") or "", True)
-          printable("PACKET_ID", os.environ.get("PACKET_ID") or "", False)
           org = json.loads(Path(".stegverse/transition-ledger/org-contract.json").read_text())
           repo = json.loads(Path(".stegverse/transition-ledger/contract.json").read_text())["repository_ledger_location"]
           assert org["organization_ledger_repository"] == "GCAT-BCAT-Engine/.github"
@@ -163,7 +78,7 @@ jobs:
           assert repo["ref"] == org["organization_ledger_ref"]
           assert repo["namespace"]
           assert repo["new_ledger_root"] is False
-          print("DISPATCH_INPUTS_AND_CONTRACT=PASS")
+          print("PACKET_INPUTS_AND_CONTRACT=PASS")
           PY
 
       - name: Bind the designated organization ledger ref and the repository ledger subtree within it
@@ -181,10 +96,6 @@ jobs:
           fi
 
       - name: Record the intr-destination diagnostic self-closure
-        env:
-          COMMUNICATION_ID: ${{ github.event.inputs.communication_id }}
-          PACKET_ID: ${{ github.event.inputs.packet_id }}
-          HB_EPOCH: ${{ github.event.inputs.hb_epoch }}
         run: |
           set -euo pipefail
           export STEGVERSE_ORG_LEDGER_ROOT="git+$GITHUB_WORKSPACE#$LEDGER_REF"
@@ -192,13 +103,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/results"
           args=(
             --self-close
-            --communication-id "$COMMUNICATION_ID"
+            --communication-id "$CLOSURE_COMMUNICATION_ID"
             --registry org-boundary/registry/services.json
             --out "$RUNNER_TEMP/results/closure.json"
             --hb-epoch "$HB_EPOCH"
+            --committed-request ".stegverse/intr-destination/self-closure-packet.json=$CLOSURE_PACKET_SHA256"
           )
-          if [ -n "${PACKET_ID:-}" ]; then
-            args+=(--packet-id "$PACKET_ID")
+          if [ -n "${CLOSURE_PACKET_ID:-}" ]; then
+            args+=(--packet-id "$CLOSURE_PACKET_ID")
           fi
           python resident-runtime/intr_destination_ingress.py "${args[@]}"
           python - <<'PY'

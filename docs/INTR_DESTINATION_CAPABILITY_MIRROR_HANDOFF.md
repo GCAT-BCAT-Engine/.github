@@ -84,10 +84,11 @@ of that same ref. A run that leaves the roots unset does not choose a default
 durable location.
 
 `self_close` records a diagnostic this organization addresses to its own
-`gcat-bcat-engine.intr-destination`. `organization-ledger-transition.yml`
-`workflow_dispatch` is the run that appends that pair, fast-forward pushes
-the ref, and reads both receipts back, including `communication_id`. The
-validation job redirects the roots. A redirected store is not the published
+`gcat-bcat-engine.intr-destination`. `organization-ledger-transition.yml`,
+on a push to main that changes `.stegverse/intr-destination/self-closure-packet.json`,
+is the run that appends that pair, fast-forward pushes the ref, and reads both
+receipts back, including `communication_id`. The validation job
+(`organization-ledger-transition-validation.yml`) redirects the roots. A redirected store is not the published
 ref.
 
 Emit and close for this capability live in

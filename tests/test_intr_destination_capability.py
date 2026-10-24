@@ -2108,13 +2108,24 @@ class InTreeDispatcherTests(CopiedRepository):
         for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
             text = workflow.read_text(encoding="utf-8")
             dispatch_only = _workflow_triggers(text) == ["workflow_dispatch"]
+            # The 09:20Z COMMITTED_REQUEST route: a push writer triggered only by
+            # its committed request file, whose epoch comes from that file alone.
+            committed_request = (_workflow_triggers(text) == ["push"]
+                                 and "paths:\n      - '.stegverse/intr-destination/self-closure-packet.json'\n" in text)
             for name, job in _workflow_jobs(text).items():
                 for call in re.finditer(r"python3? (\S+\.py)", job):
                     if call.group(1) not in scripts:
                         continue
                     where = workflow.name + ":" + name + ":" + call.group(1)
-                    self.assertTrue(dispatch_only or "if: github.event_name == 'workflow_dispatch'" in job, where)
-                    self.assertIn("writer_epoch_refusal", job[:call.start()], where)
+                    before = job[:call.start()]
+                    if committed_request:
+                        self.assertIn("self_closure_packet.py --packet", before, where)
+                        self.assertLess(before.index("self_closure_packet.py --packet"),
+                                        before.index("writer_epoch_refusal"), where)
+                        self.assertIn("--committed-request", job, where)
+                    else:
+                        self.assertTrue(dispatch_only or "if: github.event_name == 'workflow_dispatch'" in job, where)
+                    self.assertIn("writer_epoch_refusal", before, where)
                     self.assertIn("--hb-epoch", job, where)
 
 
@@ -2494,7 +2505,10 @@ class TransientWriterFaultTests(CopiedRepository):
         self.assert_deferred_then_once(Path(self._work.name), "probe-lost-every", 0)
 
     def test_a_lost_comparison_on_the_organization_append_defers_and_the_replay_lands_once(self):
-        self.assert_deferred_then_once(os.environ["STEGVERSE_ORG_LEDGER_ROOT"], "probe-lost-org", 1)
+        # The two-level append is all or nothing (resident-runtime/ledger_gitstore.py
+        # two_level_atomic, from main): the lost organization half rolls the
+        # repository half back, so the deferred cycle leaves neither receipt.
+        self.assert_deferred_then_once(os.environ["STEGVERSE_ORG_LEDGER_ROOT"], "probe-lost-org", 0)
 
 
 class CarriedWriterVerificationTests(CopiedRepository):
@@ -4082,3 +4096,43 @@ class DeepJsonFrameTests(CopiedRepository):
                       if (r.get("evidence") or {}).get("communication_id") == "probe-deep-gw-next"]
         self.assertEqual(len(repository), 1)
 
+
+
+class CommittedRequestPushWriterTests(RedirectedLedgers):
+    """The 09:20Z COMMITTED_REQUEST rule, (b): the push writer (organization-ledger-transition.yml
+    close, triggered by a committed self-closure packet since main's PR #18 line) records the
+    committed request's own digest in the receipts it writes; its epoch is SUPPLIED by that request."""
+
+    DIGEST = "sha256:" + "c" * 64
+    REQUEST = ".stegverse/intr-destination/self-closure-packet.json"
+
+    def command(self, *extra):
+        out = Path(self._work.name) / "closure.json"
+        args = ["python3", str(ROOT / "resident-runtime/intr_destination_ingress.py"), "--self-close",
+                "--communication-id", "probe-committed-request",
+                "--registry", str(ROOT / "org-boundary/registry/services.json"),
+                "--out", str(out), "--hb-epoch", "4096", *extra]
+        return subprocess.run(args, env=dict(os.environ), capture_output=True, text=True), out
+
+    def test_both_receipts_record_the_committed_request_digest(self):
+        run, _ = self.command("--committed-request", self.REQUEST + "=" + self.DIGEST)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        expected = {"path": self.REQUEST, "sha256": self.DIGEST, "hb_epoch_source": "COMMITTED_REQUEST"}
+        repository, = self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+        organization, = self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1")
+        self.assertEqual(repository["evidence"]["committed_request"], expected)
+        self.assertEqual(organization["boundary_evidence"]["committed_request"], expected)
+        for receipt in (repository, organization):
+            self.assertEqual((receipt["hb_reference"]["epoch"], receipt["hb_reference"]["derived_from_clock"]),
+                             (4096, False))
+
+    def test_a_malformed_committed_request_is_refused_with_nothing_written(self):
+        for value in ("no-digest", self.REQUEST + "=sha256:short", "=" + self.DIGEST, self.REQUEST + "=" + "c" * 71):
+            with self.subTest(value=value):
+                run, _ = self.command("--committed-request", value)
+                self.assertEqual(run.returncode, 1, run.stderr)
+                self.assertNotIn("Traceback", run.stderr)
+                refusal = json.loads(run.stdout)
+                self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("CLI_INPUT_INVALID", True))
+                for variable in self.LEDGER_ROOTS:
+                    self.assertFalse(Path(os.environ[variable]).exists(), variable)

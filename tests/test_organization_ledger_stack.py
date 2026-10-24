@@ -134,7 +134,7 @@ class ContractAndBoundaryTests(unittest.TestCase):
 
 
 WORKFLOW = ".github/workflows/organization-ledger-transition.yml"
-WORKFLOW_EPOCH_STEP = "      - name: Refuse an absent or invalid dispatch hb_epoch by the kernel's shared rule\n"
+WORKFLOW_EPOCH_STEP = "Refuse an absent or invalid committed-request hb_epoch by the kernel's shared rule"
 SIX_FIELDS = ("failure_code", "failed_predicate", "required_evidence_or_repair",
               "retry_entrypoint", "owning_existing_goal", "next_attempt")
 
@@ -156,8 +156,10 @@ class WorkflowEpochGateTests(unittest.TestCase):
         return subprocess.run(["python", "-c", _workflow_epoch_check()], cwd=ROOT, env=env,
                               capture_output=True, text=True)
 
-    def test_the_dispatch_epoch_step_emits_the_kernel_six_field_refusal(self):
-        # A workflow_dispatch input cannot tell empty from absent: both are NOT_SUPPLIED.
+    def test_the_committed_request_epoch_step_emits_the_kernel_six_field_refusal(self):
+        # The push writer's epoch comes only from the committed request
+        # (self_closure_packet.py writes HB_EPOCH, "" when the packet has none):
+        # empty and absent are both NOT_SUPPLIED (the 09:20Z COMMITTED_REQUEST rule).
         cases = {"": "HB_EPOCH_NOT_SUPPLIED", None: "HB_EPOCH_NOT_SUPPLIED",
                  "\uff13\uff13": "HB_EPOCH_INVALID", "\u0663\u0663": "HB_EPOCH_INVALID",
                  "+33": "HB_EPOCH_INVALID", " 33": "HB_EPOCH_INVALID", "33.0": "HB_EPOCH_INVALID",
@@ -173,14 +175,14 @@ class WorkflowEpochGateTests(unittest.TestCase):
                 for field in SIX_FIELDS:
                     self.assertTrue(refusal[field], field)
                 self.assertEqual(refusal["retry_entrypoint"],
-                                 WORKFLOW + " (workflow_dispatch hb_epoch)")
+                                 WORKFLOW + " (.stegverse/intr-destination/self-closure-packet.json hb_epoch)")
                 self.assertIs(refusal["derived_from_clock"], False)
                 self.assertIs(refusal["consequence_committed"], False)
 
-    def test_the_dispatch_epoch_step_passes_a_supplied_epoch(self):
+    def test_the_committed_request_epoch_step_passes_a_supplied_epoch(self):
         run = self._run("4096")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual(run.stdout.strip(), "DISPATCH_HB_EPOCH=SUPPLIED")
+        self.assertEqual(run.stdout.strip(), "COMMITTED_REQUEST_HB_EPOCH=SUPPLIED")
 
     def test_the_workflow_carries_no_other_epoch_gate(self):
         text = (ROOT / WORKFLOW).read_text(encoding="utf-8")
