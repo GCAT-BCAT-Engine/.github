@@ -4020,3 +4020,65 @@ class DeepJsonFrameTests(CopiedRepository):
         refusal = json.loads(printed.call_args.args[0])
         self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("GATEWAY_TRANSPORT_FAILED", False))
 
+    def test_the_cycle_acks_a_deep_frame_in_a_readable_envelope_blocked_and_consumes_the_next(self):
+        """GATEWAY_DEEP_FRAME_WEDGE (VALIDATOR V-P11 @ef82cd7): through the real federation_cycle gateway
+        path, a frame nested past the parser's depth inside a readable envelope is acked BLOCKED with
+        six-field FRAME_INGEST_FAILED, so the gateway drops it; the valid frame behind it is consumed once."""
+        cycle = self.cycle()
+        deep_sha = "sha256:" + "d" * 64
+        deep_reply = ('{"state":"FRAME_AVAILABLE","frame":{"packet_id":"probe-deep-gw-frame","frame_sha256":"'
+                      + deep_sha + '","heartbeat_reference":' + "[" * 200000 + "]" * 200000 + "}}")
+        valid = kernel.carrier_frame(kernel.build_packet(
+            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
+            destination_org=THIS, destination_service=ADDRESS, payload=diagnostic("probe-deep-gw-next"),
+            transition_reference="intr:transition:probe-deep-gw-next", authority_effect="NONE",
+            packet_id="probe-deep-gw-next"), epoch=4096)
+        queue = [deep_reply, json.dumps({"state": "FRAME_AVAILABLE", "frame": valid}),
+                 json.dumps({"state": "NO_FRAME"})]
+        acks, submitted = [], []
+
+        class Response:
+            def __init__(self, body):
+                self.body = body.encode("utf-8")
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                return False
+            def read(self):
+                return self.body
+
+        def urlopen(request, timeout=None):
+            if request.get_method() == "GET":
+                return Response(queue[0])
+            body = json.loads(request.data.decode("utf-8"))
+            if request.full_url.endswith("/acknowledgements"):
+                acks.append(body)
+                # The gateway drops the frame it was acknowledged for.
+                if queue and (body["packet_id"] in queue[0]):
+                    queue.pop(0)
+                return Response(json.dumps({"state": body["state"]}))
+            submitted.append(body)
+            return Response(json.dumps({"state": "PENDING"}))
+
+        def run():
+            with mock.patch.dict(os.environ, {"STEGVERSE_ORG_FEDERATION_GATEWAY_URL": "https://gateway.invalid"}), \
+                    mock.patch.object(cycle.GW, "urlopen", side_effect=urlopen), \
+                    mock.patch("builtins.print"):
+                self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
+            return json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text(encoding="utf-8"))
+
+        first = run()
+        self.assertEqual((first["state"], first["frames_consumed"]), ("REFUSED", 0))
+        self.assertEqual((acks[0]["packet_id"], acks[0]["frame_sha256"], acks[0]["state"]),
+                         ("probe-deep-gw-frame", deep_sha, "BLOCKED"))
+        self.assertEqual((acks[0]["refusal"]["failure_code"], acks[0]["refusal"]["refused_failure_code"],
+                          acks[0]["refusal"]["terminal"]), ("FRAME_REFUSED_QUARANTINED", "FRAME_INGEST_FAILED", True))
+        second = run()
+        self.assertEqual((second["state"], second["frames_consumed"], second["responses_emitted"]), ("CONSUMED", 1, 1))
+        self.assertEqual(acks[1]["state"], "CONSUMED")
+        self.assertEqual(run()["state"], "NO_FRAME")
+        self.assertEqual(len(submitted), 1)
+        repository = [r for r in self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+                      if (r.get("evidence") or {}).get("communication_id") == "probe-deep-gw-next"]
+        self.assertEqual(len(repository), 1)
+

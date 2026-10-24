@@ -44,7 +44,8 @@ def timeout_seconds() -> float:
     return value
 
 
-def _json_request(method: str, path: str, *, body: dict[str, Any] | None = None, headers: dict[str, str] | None = None) -> dict[str, Any]:
+def _raw_request(method: str, path: str, *, body: dict[str, Any] | None = None,
+                 headers: dict[str, str] | None = None) -> bytes:
     url = gateway_base_url() + path
     raw = None if body is None else json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
     hdrs = {"Accept": "application/json", **(headers or {})}
@@ -56,10 +57,118 @@ def _json_request(method: str, path: str, *, body: dict[str, Any] | None = None,
             payload = resp.read()
     except (HTTPError, URLError, TimeoutError) as exc:
         raise FederationGatewayTransportError(f"gateway request failed: {exc}") from exc
+    return payload
+
+
+def _json_request(method: str, path: str, *, body: dict[str, Any] | None = None,
+                  headers: dict[str, str] | None = None) -> dict[str, Any]:
+    payload = _raw_request(method, path, body=body, headers=headers)
     try:
         return json.loads(payload.decode("utf-8"))
     except Exception as exc:
         raise FederationGatewayTransportError("gateway response is not JSON") from exc
+
+
+_WHITESPACE = " \t\n\r"
+
+
+def _skip_whitespace(text: str, index: int) -> int:
+    while index < len(text) and text[index] in _WHITESPACE:
+        index += 1
+    return index
+
+
+def _value_end(text: str, index: int) -> int:
+    """The end of the JSON value starting at `index`, found without recursion.
+
+    Brackets are counted iteratively and strings skipped whole, so a value
+    nested past the parser's depth still has a known span.
+    """
+    if index >= len(text):
+        raise ValueError("value expected")
+    if text[index] == '"':
+        return json.decoder.scanstring(text, index + 1)[1]
+    if text[index] in "[{":
+        depth = 0
+        while index < len(text):
+            char = text[index]
+            if char == '"':
+                index = json.decoder.scanstring(text, index + 1)[1]
+                continue
+            if char in "[{":
+                depth += 1
+            elif char in "]}":
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+            index += 1
+        raise ValueError("unterminated value")
+    end = index
+    while end < len(text) and text[end] not in ",}]" + _WHITESPACE:
+        end += 1
+    if end == index:
+        raise ValueError("value expected")
+    return end
+
+
+def _object_members(text: str) -> dict[str, str]:
+    """The raw text of each top-level member of a JSON object, without parsing the values."""
+    index = _skip_whitespace(text, 0)
+    if index >= len(text) or text[index] != "{":
+        raise ValueError("object expected")
+    members: dict[str, str] = {}
+    index = _skip_whitespace(text, index + 1)
+    if index < len(text) and text[index] == "}":
+        return members
+    while True:
+        if index >= len(text) or text[index] != '"':
+            raise ValueError("member name expected")
+        name, index = json.decoder.scanstring(text, index + 1)
+        index = _skip_whitespace(text, index)
+        if index >= len(text) or text[index] != ":":
+            raise ValueError("':' expected")
+        start = _skip_whitespace(text, index + 1)
+        end = _value_end(text, start)
+        members[name] = text[start:end]
+        index = _skip_whitespace(text, end)
+        if index < len(text) and text[index] == ",":
+            index = _skip_whitespace(text, index + 1)
+            continue
+        if index < len(text) and text[index] == "}":
+            if _skip_whitespace(text, index + 1) != len(text):
+                raise ValueError("trailing content after the object")
+            return members
+        raise ValueError("',' or '}' expected")
+
+
+def read_fetch_reply(payload: bytes) -> dict[str, Any]:
+    """A gateway fetch reply, with the envelope read apart from the frame it carries.
+
+    A frame that cannot be parsed (nested past the parser's depth, or not a
+    document this boundary can use) inside a readable envelope is returned
+    as `unusable_frame`: its `packet_id` and `frame_sha256`, read from the
+    frame's own top-level members, so the frame can be acknowledged BLOCKED
+    and the gateway moves on to the next one. Only an envelope that cannot
+    be read is a FederationGatewayTransportError.
+    """
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeError as exc:
+        raise FederationGatewayTransportError("gateway response is not UTF-8") from exc
+    try:
+        return json.loads(text)
+    except K.JSON_DOCUMENT_ERRORS as whole:
+        try:
+            envelope = _object_members(text)
+            reply = {name: json.loads(raw) for name, raw in envelope.items() if name != "frame"}
+            frame_members = _object_members(envelope["frame"])
+            handle = {name: json.loads(frame_members[name]) for name in ("packet_id", "frame_sha256")}
+        except (*K.JSON_DOCUMENT_ERRORS, KeyError) as exc:
+            raise FederationGatewayTransportError("gateway response is not a readable document") from exc
+        if not all(isinstance(value, str) and value for value in handle.values()):
+            raise FederationGatewayTransportError("gateway frame names no acknowledgeable packet")
+        reply["unusable_frame"] = {**handle, "error": whole}
+        return reply
 
 
 def submit_frame(frame: dict[str, Any]) -> dict[str, Any]:
@@ -75,11 +184,11 @@ def submit_frame(frame: dict[str, Any]) -> dict[str, Any]:
 
 def fetch_frame(organization: str) -> dict[str, Any]:
     query = urlencode({"organization": organization})
-    return _json_request(
+    return read_fetch_reply(_raw_request(
         "GET",
         "/api/org-federation/v1/frames?" + query,
         headers={"X-StegVerse-Organization": organization},
-    )
+    ))
 
 
 #: A gateway cycle's epoch is supplied by the federation cycle and stamps the
@@ -289,6 +398,30 @@ def resident_gateway_cycle(repo_root: Path, *, hb_epoch: int | None = None) -> d
         }
     if fetched.get("state") != "FRAME_AVAILABLE":
         raise FederationGatewayTransportError("unexpected gateway fetch state")
+    unusable = fetched.get("unusable_frame")
+    if unusable is not None:
+        # The frame's own fault, read apart from a readable envelope: it is
+        # terminal and acknowledged BLOCKED, so the gateway drops it and the
+        # next frame is offered. It is never ingested.
+        frame = {"packet_id": unusable["packet_id"], "frame_sha256": unusable["frame_sha256"]}
+        result = K.quarantine_result(frame, K.frame_failure_refusal(unusable["error"]))
+        try:
+            ack = acknowledge_frame(organization, frame, "BLOCKED", hb_epoch=ack_epoch, refusal=result["refusal"])
+        except (OSError, FederationGatewayTransportError) as exc:
+            return _deferred_cycle(organization, frame, exc)
+        return {
+            "schema_version": "stegverse.org-federation-gateway-cycle.v1",
+            "organization": organization,
+            "state": "REFUSED",
+            "refusal": result["refusal"],
+            "packet_id": frame["packet_id"],
+            "frame_sha256": frame["frame_sha256"],
+            "frames_consumed": 0,
+            "responses_emitted": 0,
+            "response_frame_sha256": None,
+            "ack_state": ack.get("state"),
+            "gateway_execution_authority": "NONE",
+        }
     frame = fetched["frame"]
     collision = _gateway_response_collision(repo_root, frame)
     if collision is not None:
