@@ -623,7 +623,8 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "ADMISSION_SCHEMA","ADMISSION_FIELDS","ingest_or_quarantine","frame_failure_refusal",
          "recorded_response","response_collision_refusal","writer_fault_refusal","cli_refusal",
          "WRITER_IO_FAILED","WRITER_WRITE_FAILED","CLI_INPUT_INVALID","InputRefused","input_refusal",
-         "read_json_input","strict_json_loads","frame_file_raw_sha256","JSON_DOCUMENT_ERRORS","collision_refusal","LEDGER_RECEIPT_COLLISION","control_response_packet_id","request_binding",
+         "read_json_input","strict_json_loads","CallerEvidenceRefused","committed_request_path",
+         "refuse_caller_committed_request","FORGED_COMMITTED_REQUEST","frame_file_raw_sha256","JSON_DOCUMENT_ERRORS","collision_refusal","LEDGER_RECEIPT_COLLISION","control_response_packet_id","request_binding",
          "RESPONSE_ID_COLLISION","ResponseIdCollision","RESPONDING_MESSAGE_CLASSES","write_json_atomic","write_once_json",
          "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED","FRAME_DISPATCH_IO_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
@@ -1084,6 +1085,44 @@ def strict_json_loads(text:str)->Any:
     """json.loads that refuses NaN, Infinity, -Infinity and a float that overflows (1e999), so a
     non-finite number never reaches a receipt; each is a ValueError, a JSON_DOCUMENT_ERRORS."""
     return json.loads(text,parse_constant=_refuse_non_finite_constant,parse_float=_finite_float)
+
+COMMITTED_REQUEST_KEY="committed_request"
+FORGED_COMMITTED_REQUEST="FORGED_COMMITTED_REQUEST_FROM_EVIDENCE_JSON"
+
+class CallerEvidenceRefused(ValueError):
+    """Caller-supplied evidence that names a committed request; carries the six-field refusal."""
+    def __init__(self, refusal:dict[str,Any]):
+        super().__init__(refusal["detail"]); self.refusal=refusal
+
+def committed_request_path(value:Any)->str|None:
+    """Where a committed_request key sits in a JSON value, at any depth, or None. Walked without recursion."""
+    pending=[("$",value)]
+    while pending:
+        path,node=pending.pop()
+        if isinstance(node,dict):
+            for key,child in node.items():
+                if key==COMMITTED_REQUEST_KEY:
+                    return path+"."+str(key)
+                pending.append((path+"."+str(key),child))
+        elif isinstance(node,list):
+            pending.extend((path+"["+str(index)+"]",child) for index,child in enumerate(node))
+    return None
+
+def refuse_caller_committed_request(value:Any, *, argument:str, retry_entrypoint:str)->None:
+    """A committed request is bound only by this boundary's own binding receipt, from the
+    request the run itself read; caller evidence naming one at any depth is refused before
+    any write (FORGED_COMMITTED_REQUEST_FROM_EVIDENCE_JSON), six fields, terminal."""
+    path=committed_request_path(value)
+    if path is None:
+        return
+    raise CallerEvidenceRefused({
+        "disposition":"FAIL_CLOSED","failure_code":FORGED_COMMITTED_REQUEST,"terminal":True,
+        "failed_predicate":"CALLER_EVIDENCE_NAMES_NO_COMMITTED_REQUEST",
+        "detail":argument+" names "+path+"; a committed request is never taken from caller evidence",
+        "required_evidence_or_repair":("drop the committed_request key; the committed request is bound by "
+                                        "resident-runtime/committed_request_binding.py from the request itself"),
+        "retry_entrypoint":retry_entrypoint,"owning_existing_goal":HB_EPOCH_OWNING_EXISTING_GOAL,
+        "next_attempt":"nothing was written; run again without the key","consequence_committed":False})
 
 def read_json_input(source:Any, *, argument:str, retry_entrypoint:str, inline:bool=False,
                     expect:type|None=dict)->Any:

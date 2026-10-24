@@ -107,12 +107,20 @@ jobs:
             --registry org-boundary/registry/services.json
             --out "$RUNNER_TEMP/results/closure.json"
             --hb-epoch "$HB_EPOCH"
-            --committed-request ".stegverse/intr-destination/self-closure-packet.json=$CLOSURE_PACKET_SHA256"
           )
           if [ -n "${CLOSURE_PACKET_ID:-}" ]; then
             args+=(--packet-id "$CLOSURE_PACKET_ID")
           fi
+          # The InTr receiving operation is kept byte-identical to main and does
+          # not record the committed request; this boundary binds it to the
+          # receipts it wrote (committed_request_binding.py), folded into their
+          # commit on the ledger ref, before anything is pushed.
+          since_tip=$(git rev-parse --verify --quiet "$LEDGER_REF" || true)
           python resident-runtime/intr_destination_ingress.py "${args[@]}"
+          python resident-runtime/committed_request_binding.py bind \
+            --committed-request ".stegverse/intr-destination/self-closure-packet.json=$CLOSURE_PACKET_SHA256" \
+            --ingress-result "$RUNNER_TEMP/results/closure.json" \
+            --hb-epoch "$HB_EPOCH" --since-tip "$since_tip" > "$RUNNER_TEMP/results/binding.json"
           python - <<'PY'
           import json, os
           result = json.load(open(os.environ["RUNNER_TEMP"] + "/results/closure.json"))
@@ -152,6 +160,7 @@ jobs:
             --location "git+$fresh#$LEDGER_REF" \
             --ingress-result "$RUNNER_TEMP/results/closure.json" \
             --repository-namespace "$REPO_LEDGER_NAMESPACE" \
+            --committed-request ".stegverse/intr-destination/self-closure-packet.json=$CLOSURE_PACKET_SHA256" \
             --out "$RUNNER_TEMP/results/readback.json"
           {
             echo '### intr-destination self-closure'

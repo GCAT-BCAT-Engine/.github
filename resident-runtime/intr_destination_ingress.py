@@ -22,9 +22,8 @@ does not claim StegOS already named it.
 
 ``self_close`` builds a diagnostic for this organization's own
 ``intr-destination`` and calls ``receive``. Both ledger levels append through
-the repository emitter and the organization aggregator. A push to main of the
-committed self-closure packet (organization-ledger-transition.yml) is what
-publishes those receipts on ``refs/stegverse/organization-ledger``.
+the repository emitter and the organization aggregator. A workflow_dispatch
+run is what publishes those receipts on ``refs/stegverse/organization-ledger``.
 
 Authority and time are constraint variables. The address did not select a
 processor. The disposition is transition evidence only.
@@ -122,8 +121,7 @@ def shape_refusal(payload: Any) -> tuple[str, str] | None:
 
 
 def _evidence(payload: Any, packet_id: str, disposition: str, *,
-              failed_predicate: str | None = None, detail: str | None = None,
-              committed_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
+              failed_predicate: str | None = None, detail: str | None = None) -> dict[str, Any]:
     communication_id = payload.get("communication_id") if isinstance(payload, Mapping) else None
     effect = ACK_EFFECT if disposition == ALLOW else REFUSAL_EFFECT
     record: dict[str, Any] = {
@@ -146,10 +144,6 @@ def _evidence(payload: Any, packet_id: str, disposition: str, *,
     if failed_predicate is not None:
         record["failed_predicate"] = failed_predicate
         record["detail"] = detail
-    if committed_request is not None:
-        # The committed state transition this crossing was triggered by: its
-        # epoch is SUPPLIED by the request, and the request is bound by digest.
-        record["committed_request"] = dict(committed_request)
     return record
 
 
@@ -259,15 +253,12 @@ def _append_halves(transition_class: str, packet_id: str, evidence: Mapping[str,
 
 def _recorded(disposition: str, payload: Any, packet_id: str, hb_epoch: int | None, *,
               failed_predicate: str | None = None, detail: str | None = None,
-              hb_provenance: Mapping[str, Any] | None = None,
-              committed_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
+              hb_provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
     evidence = _evidence(payload, packet_id, disposition,
-                         failed_predicate=failed_predicate, detail=detail, committed_request=committed_request)
+                         failed_predicate=failed_predicate, detail=detail)
     transition_class = OPERATION_ID if disposition == ALLOW else REFUSED_CLASS
     try:
-        appended, replayed = _append(
-            transition_class, packet_id, evidence, hb_epoch, hb_provenance,
-            boundary_extra=None if committed_request is None else {"committed_request": dict(committed_request)})
+        appended, replayed = _append(transition_class, packet_id, evidence, hb_epoch, hb_provenance)
     except ValueError as exc:
         if str(exc) != "ledger_receipt_collision":
             raise
@@ -288,15 +279,12 @@ def _recorded(disposition: str, payload: Any, packet_id: str, hb_epoch: int | No
 
 
 def self_close(communication_id: str, *, registry: Mapping[str, Any],
-               packet_id: str | None = None, hb_epoch: int | None = None,
-               committed_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
+               packet_id: str | None = None, hb_epoch: int | None = None) -> dict[str, Any]:
     """Record an intr-destination diagnostic this organization addresses to itself.
 
     The payload is the same diagnostic ``receive`` acknowledges. It does not
     enumerate peers and it does not publish a mesh. ``communication_id`` is
     copied into the repository evidence and the organization boundary evidence.
-    ``committed_request`` (the committed packet's path and digest, when a push
-    of that packet triggered this) is recorded in both as well.
     """
     if not isinstance(communication_id, str) or not communication_id.strip():
         raise ValueError("communication_id_required")
@@ -311,7 +299,7 @@ def self_close(communication_id: str, *, registry: Mapping[str, Any],
     result = receive(
         payload, registry=registry,
         packet_id=packet_id or ("intr-destination-self-closure:" + communication_id),
-        hb_epoch=hb_epoch, committed_request=committed_request)
+        hb_epoch=hb_epoch)
     result["self_closure"] = True
     result["addressed_service"] = ADDRESSED_SERVICE
     return result
@@ -320,8 +308,7 @@ def self_close(communication_id: str, *, registry: Mapping[str, Any],
 def receive(payload: Any, *, registry: Mapping[str, Any], standing: Mapping[str, Any] | None = None,
             packet_id: str = "organization-intr-destination",
             hb_epoch: int | None = None, mesh_root: Path | None = None,
-            hb_provenance: Mapping[str, Any] | None = None,
-            committed_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
+            hb_provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Acknowledge one diagnostic, or record the refusal.
 
     ``standing`` and ``mesh_root`` are accepted because the capability resolver
@@ -332,13 +319,12 @@ def receive(payload: Any, *, registry: Mapping[str, Any], standing: Mapping[str,
     if not isinstance(registry, Mapping):
         return _recorded(DENY, payload, packet_id, hb_epoch, hb_provenance=hb_provenance,
                          failed_predicate="CAPABILITY_MAP_IS_A_MAPPING",
-                         detail="registry is not an object", committed_request=committed_request)
+                         detail="registry is not an object")
     refusal = shape_refusal(payload)
     if refusal is not None:
         return _recorded(DENY, payload, packet_id, hb_epoch, hb_provenance=hb_provenance,
-                         failed_predicate=refusal[0], detail=refusal[1], committed_request=committed_request)
-    return _recorded(ALLOW, payload, packet_id, hb_epoch, hb_provenance=hb_provenance,
-                     committed_request=committed_request)
+                         failed_predicate=refusal[0], detail=refusal[1])
+    return _recorded(ALLOW, payload, packet_id, hb_epoch, hb_provenance=hb_provenance)
 
 
 def main() -> int:
@@ -350,8 +336,6 @@ def main() -> int:
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--packet-id", default=None)
     parser.add_argument("--hb-epoch", type=str, default=None)
-    parser.add_argument("--committed-request", default=None,
-                        help="PATH=sha256:<hex>: the committed packet that triggered this self-closure")
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
     if args.self_close and not args.communication_id:
@@ -374,21 +358,10 @@ def main() -> int:
     except kernel.InputRefused as exc:
         print(json.dumps(exc.refusal, sort_keys=True))
         return 1
-    committed_request = None
-    if args.committed_request is not None:
-        path, _, digest = args.committed_request.partition("=")
-        if (not path or not digest.startswith("sha256:") or len(digest) != 71
-                or any(c not in "0123456789abcdef" for c in digest[7:])):
-            print(json.dumps(kernel.input_refusal(
-                "--committed-request", "not PATH=sha256:<64 hex>", retry_entrypoint=EPOCH_RETRY_ENTRYPOINT),
-                sort_keys=True))
-            return 1
-        committed_request = {"path": path, "sha256": digest, "hb_epoch_source": "COMMITTED_REQUEST"}
     try:
         if args.self_close:
             result = self_close(args.communication_id, registry=registry,
-                                packet_id=args.packet_id, hb_epoch=hb_epoch,
-                                committed_request=committed_request)
+                                packet_id=args.packet_id, hb_epoch=hb_epoch)
         else:
             result = receive(
                 payload,

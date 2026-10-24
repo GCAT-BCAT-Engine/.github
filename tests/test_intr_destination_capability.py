@@ -2077,10 +2077,22 @@ class InTreeDispatcherTests(CopiedRepository):
         repository = self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
         organization = self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1")
         self.assertEqual((len(repository), len(organization)), (1, 1))
-        self.assertEqual(repository[0]["evidence"]["committed_request"], expected)
-        self.assertEqual(organization[0]["boundary_evidence"]["committed_request"], expected)
         for receipt in repository + organization:
             self.assertEqual(receipt["hb_reference"]["epoch"], 4096)
+        # The InTr operation is main's and records no request (20:08Z-20:14Z
+        # rulings): one companion binding receipt binds the request to both.
+        bindings = self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.committed-request-binding-receipt/v1")
+        self.assertEqual(len(bindings), 1)
+        bound = bindings[0]
+        self.assertEqual((bound["committed_request"], bound["hb_epoch"]), (expected, 4096))
+        self.assertEqual([(entry["ledger"], entry["receipt_sha256"], entry["previous_receipt_sha256"])
+                          for entry in bound["bound_receipts"]],
+                         [("repository", repository[0]["receipt_sha256"], repository[0]["previous_receipt_sha256"]),
+                          ("organization", organization[0]["receipt_sha256"],
+                           organization[0]["previous_receipt_sha256"])])
+        self.assertEqual(bound["organization_head_receipt_sha256"], organization[0]["receipt_sha256"])
+        binder = _module("committed_request_binding_for_cycle_test", "resident-runtime/committed_request_binding.py")
+        self.assertEqual(binder.verify(expected=[(expected, organization[0]["receipt_sha256"])])["disposition"], "ALLOW")
 
     def test_the_dispatcher_refuses_an_absent_or_invalid_request_epoch_before_any_entrypoint(self):
         cases = ((self.request(), 2, "HB_EPOCH_NOT_SUPPLIED"),
@@ -2952,9 +2964,27 @@ class WriterTraceTests(CopiedRepository):
             self.mesh, self.out, Path(self._work.name) / "runtime",
             self.copy / "resident-runtime/federation", self.copy / "resident-runtime/control"]
 
+    repo_seed = None
+
     def reset(self):
         for root in self.state_roots():
             shutil.rmtree(root, ignore_errors=True)
+        # A source repository receipt the aggregate is handed must be on the run's
+        # own repository ledger (COMMITTED_REQUEST_DIGEST_UNVERIFIED): the ledger it
+        # was minted on is restored as the run's repository ledger.
+        if self.repo_seed is not None and self.repo_seed.exists():
+            shutil.copytree(self.repo_seed, os.environ["STEGVERSE_REPO_LEDGER_ROOT"])
+
+    def mint_source(self, transition_id):
+        """A repository receipt minted on one source ledger, which becomes every run's repository ledger."""
+        emit = _module("emit_source_" + transition_id.replace("-", "_"), ".stegverse/transition-ledger/emit.py")
+        root = os.environ["STEGVERSE_REPO_LEDGER_ROOT"]
+        self.repo_seed = self.inputs / "source-ledger"
+        os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = str(self.repo_seed)
+        try:
+            return emit.append(transition_id, "CLASS", "sha256:" + "a" * 64, "sha256:" + "b" * 64, {}, "NONE", 4096)
+        finally:
+            os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = root
 
     def documents(self):
         """Every document left, with a response frame named by its response id: a resumed run's
@@ -3047,18 +3077,9 @@ class WriterTraceTests(CopiedRepository):
 
     def test_the_organization_aggregate(self):
         receipt = self.inputs / "repo-receipt.json"
+        receipt.write_text(json.dumps(self.mint_source("probe-writer-trace")), encoding="utf-8")
 
         def load():
-            emit = _module("emit_trace_source", ".stegverse/transition-ledger/emit.py")
-            if not receipt.exists():
-                root = os.environ["STEGVERSE_REPO_LEDGER_ROOT"]
-                os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = str(self.inputs / "source-ledger")
-                try:
-                    receipt.write_text(json.dumps(emit.append(
-                        "probe-writer-trace", "CLASS", "sha256:" + "a" * 64, "sha256:" + "b" * 64,
-                        {}, "NONE", 4096)), encoding="utf-8")
-                finally:
-                    os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = root
             return self.cli("aggregate_trace", "resident-runtime/aggregate_repo_transition.py")()
 
         self.assert_each_write_fault_is_six_field_and_resumable(
@@ -3152,15 +3173,7 @@ class WriterTraceTests(CopiedRepository):
     def source_receipt(self, name, transition_id):
         path = self.inputs / (name + ".json")
         if not path.exists():
-            emit = _module("emit_post_head_source", ".stegverse/transition-ledger/emit.py")
-            root = os.environ["STEGVERSE_REPO_LEDGER_ROOT"]
-            os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = str(self.inputs / ("source-ledger-" + name))
-            try:
-                path.write_text(json.dumps(emit.append(
-                    transition_id, "CLASS", "sha256:" + "a" * 64, "sha256:" + "b" * 64, {}, "NONE", 4096)),
-                    encoding="utf-8")
-            finally:
-                os.environ["STEGVERSE_REPO_LEDGER_ROOT"] = root
+            path.write_text(json.dumps(self.mint_source(transition_id)), encoding="utf-8")
         return path
 
     def aggregate_argv(self, receipt, predecessor):
@@ -3881,25 +3894,37 @@ class CommittedRequestPushWriterTests(RedirectedLedgers):
                 "--out", str(out), "--hb-epoch", "4096", *extra]
         return subprocess.run(args, env=dict(os.environ), capture_output=True, text=True), out
 
-    def test_both_receipts_record_the_committed_request_digest(self):
-        run, _ = self.command("--committed-request", self.REQUEST + "=" + self.DIGEST)
+    def bind(self, out, request):
+        return subprocess.run(["python3", str(ROOT / "resident-runtime/committed_request_binding.py"), "bind",
+                               "--committed-request", request, "--ingress-result", str(out), "--hb-epoch", "4096"],
+                              env=dict(os.environ), capture_output=True, text=True)
+
+    def test_the_committed_request_is_bound_to_both_receipts(self):
+        """The workflow's steps: main's InTr CLI writes the receipts, then the binding binds them."""
+        run, out = self.command()
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        bound = self.bind(out, self.REQUEST + "=" + self.DIGEST)
+        self.assertEqual(bound.returncode, 0, bound.stdout + bound.stderr)
         expected = {"path": self.REQUEST, "sha256": self.DIGEST, "hb_epoch_source": "COMMITTED_REQUEST"}
         repository, = self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
         organization, = self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1")
-        self.assertEqual(repository["evidence"]["committed_request"], expected)
-        self.assertEqual(organization["boundary_evidence"]["committed_request"], expected)
+        binding, = self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.committed-request-binding-receipt/v1")
+        self.assertEqual(binding["committed_request"], expected)
+        self.assertEqual([entry["receipt_sha256"] for entry in binding["bound_receipts"]],
+                         [repository["receipt_sha256"], organization["receipt_sha256"]])
         for receipt in (repository, organization):
             self.assertEqual((receipt["hb_reference"]["epoch"], receipt["hb_reference"]["derived_from_clock"]),
                              (4096, False))
 
-    def test_a_malformed_committed_request_is_refused_with_nothing_written(self):
+    def test_a_malformed_committed_request_is_refused_with_no_binding_written(self):
+        run, out = self.command()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         for value in ("no-digest", self.REQUEST + "=sha256:short", "=" + self.DIGEST, self.REQUEST + "=" + "c" * 71):
             with self.subTest(value=value):
-                run, _ = self.command("--committed-request", value)
-                self.assertEqual(run.returncode, 1, run.stderr)
-                self.assertNotIn("Traceback", run.stderr)
-                refusal = json.loads(run.stdout)
-                self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("CLI_INPUT_INVALID", True))
-                for variable in self.LEDGER_ROOTS:
-                    self.assertFalse(Path(os.environ[variable]).exists(), variable)
+                bound = self.bind(out, value)
+                self.assertEqual(bound.returncode, 1, bound.stderr)
+                self.assertNotIn("Traceback", bound.stderr)
+                refusal = json.loads(bound.stdout)
+                self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("COMMITTED_REQUEST_INVALID", True))
+                self.assertEqual(self.receipts("STEGVERSE_ORG_LEDGER_ROOT",
+                                               "stegverse.committed-request-binding-receipt/v1"), [])

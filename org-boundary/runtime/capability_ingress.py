@@ -161,6 +161,20 @@ def resolve(root: Path, service: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+_BINDER: Any = None
+
+
+def _committed_request_binding(root: Path):
+    """The organization's resident-runtime/committed_request_binding.py, loaded once."""
+    global _BINDER
+    if _BINDER is None:
+        spec = importlib.util.spec_from_file_location(
+            "committed_request_binding", Path(root) / "resident-runtime/committed_request_binding.py")
+        _BINDER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_BINDER)
+    return _BINDER
+
+
 def load_operation(resolved: Mapping[str, Any]):
     """Load the bound operation and refuse one that is not the operation bound.
 
@@ -276,10 +290,22 @@ def receive(root: Path, service: Mapping[str, Any], packet: Mapping[str, Any], *
     binding = binding_for_service(root, service.get("service_id"))
     submission = submission_for(binding, packet.get("payload"))
     module = load_operation(resolved)
+    # The receiving operation is the InTr lane's and does not record the
+    # committed request; this boundary binds it to the receipts the operation
+    # wrote, with a companion receipt on the committed-request-bindings chain
+    # folded into their commit (committed_request_binding.py).
+    if committed_request is not None:
+        binder = _committed_request_binding(root)
+        since_tip = binder.tip(binder.stores()[0])
     result = module.receive(submission, registry=registry, standing=packet.get("standing"),
                             packet_id=str(packet.get("packet_id") or resolved["receiving_operation_id"]),
-                            mesh_root=mesh_root, hb_epoch=hb_epoch, hb_provenance=hb_provenance,
-                            **({} if committed_request is None else {"committed_request": committed_request}))
+                            mesh_root=mesh_root, hb_epoch=hb_epoch, hb_provenance=hb_provenance)
+    binding = None
+    if committed_request is not None and isinstance(result, Mapping) and result.get("organization_receipt_sha256"):
+        binding = binder.bind(committed_request,
+                              repository_receipt_sha256=result.get("repository_receipt_sha256"),
+                              organization_receipt_sha256=result["organization_receipt_sha256"],
+                              hb_epoch=hb_epoch, since_tip=since_tip)
     return {
         "capability_received": True,
         "capability_profile_id": resolved["capability_profile_id"],
@@ -295,4 +321,5 @@ def receive(root: Path, service: Mapping[str, Any], packet: Mapping[str, Any], *
         "route_admissibility": ROUTE_ADMISSIBILITY,
         "addressability_grants_admission_authority": False,
         "receiving_operation_result": result,
+        **({} if binding is None else {"committed_request_binding": binding}),
     }

@@ -104,6 +104,8 @@ def append(transition_id,transition_class,predecessor_state_sha256,successor_sta
  CARRIED_PROVENANCE_UNVERIFIED before the store is opened.
  """
  hb_ref=kernel.supplied_hb_reference(hb_epoch,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT,provenance=hb_provenance)
+ # A committed request is never taken from caller evidence (FORGED_COMMITTED_REQUEST_FROM_EVIDENCE_JSON).
+ kernel.refuse_caller_committed_request(evidence,argument="evidence",retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
  target=store or ledger_store.open_store(lr());target.initialize()
  for _attempt in range(128):
   expected_head=target.get(ledger_store.HEAD_KEY)
@@ -136,7 +138,7 @@ def main():
  try:r=append(a.transition_id,a.transition_class,a.predecessor_state_sha256,a.successor_state_sha256,evidence,a.authority_effect,a.hb_epoch,idempotent_on=tuple(sorted(evidence)))
  except RepoLedgerChainBreak as exc:
   print(json.dumps(chain_break_refusal(exc),sort_keys=True));raise SystemExit(1)
- except RepoLedgerEpochRefused as exc:
+ except (RepoLedgerEpochRefused,kernel.CallerEvidenceRefused) as exc:
   print(json.dumps(exc.refusal,sort_keys=True));raise SystemExit(1)
  except ValueError as exc:
   if str(exc)!="ledger_receipt_collision":raise

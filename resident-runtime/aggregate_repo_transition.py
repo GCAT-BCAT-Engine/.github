@@ -246,6 +246,69 @@ def verify_required_evidence(receipt):
             raise SystemExit("canonical required evidence digest mismatch")
 
 
+COMMITTED_REQUEST_DIGEST_UNVERIFIED = "COMMITTED_REQUEST_DIGEST_UNVERIFIED"
+
+
+class SourceReceiptUnverified(ValueError):
+    """A source receipt this run cannot verify against the repository ledger; six fields."""
+
+    def __init__(self, detail, predicate):
+        super().__init__(detail)
+        self.refusal = {
+            "disposition": "FAIL_CLOSED", "failure_code": COMMITTED_REQUEST_DIGEST_UNVERIFIED, "terminal": True,
+            "failed_predicate": predicate, "detail": detail,
+            "required_evidence_or_repair": ("supply a repository receipt exactly as the repository ledger holds it, "
+                                            "reachable from its HEAD, carrying no committed request of its own"),
+            "retry_entrypoint": EPOCH_RETRY_ENTRYPOINT, "owning_existing_goal": kernel.HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt": "nothing was written; supply the receipt the ledger holds", "consequence_committed": False}
+
+
+def _repository_contract():
+    return json.loads((ROOT / ".stegverse/transition-ledger/contract.json").read_text())
+
+
+def verify_source_on_repository_ledger(receipt):
+    """COMMITTED_REQUEST_DIGEST_UNVERIFIED unless a caller-supplied repository receipt is on this
+    repository's ledger: stored at its address, byte-for-byte, and reachable from that ledger's HEAD.
+
+    A receipt carrying a committed request is refused too: this run reads none, and a committed
+    request is bound only by the companion binding receipt (committed_request_binding.py).
+    Run before any write; nothing is written on a refusal.
+    """
+    if receipt.get("schema") != "stegverse.repo-transition-receipt/v1":
+        return
+    path = kernel.committed_request_path(receipt)
+    if path is not None:
+        raise SourceReceiptUnverified("the source receipt names " + path + "; this run reads no committed request",
+                                      "A_SOURCE_RECEIPT_CARRIES_THE_RUNS_OWN_COMMITTED_REQUEST")
+    repository = _repository_contract().get("repository")
+    if receipt.get("repository") != repository:
+        raise SourceReceiptUnverified("repository " + str(receipt.get("repository")) + " is not this ledger's "
+                                      + str(repository), "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER")
+    supplied = os.environ.get("STEGVERSE_REPO_LEDGER_ROOT")
+    if not supplied:
+        raise SourceReceiptUnverified("STEGVERSE_REPO_LEDGER_ROOT is not supplied; the source cannot be verified",
+                                      "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER")
+    try:
+        store = open_store(parse_locator(supplied))
+        digest = receipt.get("receipt_sha256")
+        if not isinstance(digest, str) or not digest.startswith("sha256:") or store.get(receipt_key(digest)) != receipt:
+            raise SourceReceiptUnverified("receipt " + str(digest) + " is not stored at its address on the "
+                                          "repository ledger", "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER")
+        cursor, seen = (store.get(HEAD_KEY) or {}).get("receipt_sha256"), set()
+        while cursor is not None and cursor != digest and cursor not in seen:
+            seen.add(cursor)
+            cursor = (store.get(receipt_key(cursor)) or {}).get("previous_receipt_sha256")
+    except (*kernel.JSON_DOCUMENT_ERRORS, OSError, LedgerLocationRequired) as exc:
+        if isinstance(exc, SourceReceiptUnverified):
+            raise
+        raise SourceReceiptUnverified("the repository ledger cannot be read: " + type(exc).__name__,
+                                      "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER") from None
+    if cursor != digest:
+        raise SourceReceiptUnverified("receipt " + digest + " is not reachable from the repository ledger HEAD",
+                                      "THE_SOURCE_RECEIPT_IS_REACHABLE_FROM_THE_REPOSITORY_HEAD")
+
+
 def verify_source(receipt):
     """Verify a source transition receipt this organization's contract consumes.
 
@@ -375,6 +438,10 @@ def append(source_receipt, org_transition_class, predecessor_state, successor_st
     # Ordering is a heartbeat count the caller supplies, never a clock reading.
     # It is checked first, so a refusal opens no store and writes nothing.
     heartbeat = require_supplied_epoch(hb_epoch, hb_provenance)
+    # A committed request is never taken from caller evidence
+    # (FORGED_COMMITTED_REQUEST_FROM_EVIDENCE_JSON); refused before any write.
+    kernel.refuse_caller_committed_request(boundary_evidence, argument="boundary_evidence",
+                                           retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
     # Admission is decided before the append lock is taken; an inadmissible
     # source receipt never contends for the organization ledger.
     source = verify_source(source_receipt)
@@ -477,6 +544,9 @@ def main():
                      if receipt.get("schema") == "stegverse.repo-transition-receipt/v1"
                      else "ORGANIZATION_STATE_TRANSITION")
     try:
+        # A receipt supplied on the command line must be the one the repository
+        # ledger holds (COMMITTED_REQUEST_DIGEST_UNVERIFIED), checked before any write.
+        verify_source_on_repository_ledger(receipt)
         result = append(receipt, args.org_transition_class or default_class,
                         args.predecessor_org_state_sha256, args.successor_org_state_sha256,
                         boundary_evidence, args.authority_effect,
@@ -484,7 +554,7 @@ def main():
     except LedgerLocationRequired as exc:
         print(json.dumps(location_refusal(exc), sort_keys=True))
         raise SystemExit(1)
-    except OrgLedgerEpochRefused as exc:
+    except (OrgLedgerEpochRefused, SourceReceiptUnverified, kernel.CallerEvidenceRefused) as exc:
         print(json.dumps(exc.refusal, sort_keys=True))
         raise SystemExit(1)
     except ValueError as exc:
