@@ -156,7 +156,7 @@ def read_fetch_reply(payload: bytes) -> dict[str, Any]:
     except UnicodeError as exc:
         raise FederationGatewayTransportError("gateway response is not UTF-8") from exc
     try:
-        return json.loads(text)
+        reply = json.loads(text)
     except K.JSON_DOCUMENT_ERRORS as whole:
         try:
             envelope = _object_members(text)
@@ -169,6 +169,18 @@ def read_fetch_reply(payload: bytes) -> dict[str, Any]:
             raise FederationGatewayTransportError("gateway frame names no acknowledgeable packet")
         reply["unusable_frame"] = {**handle, "error": whole}
         return reply
+    # A readable reply must still be an object, and a frame it offers must name
+    # the packet_id and frame_sha256 its acknowledgement carries; otherwise it is
+    # the same non-terminal transport failure as an unreadable one, never a raw
+    # exception out of the cycle.
+    if not isinstance(reply, dict):
+        raise FederationGatewayTransportError("gateway response is not a JSON object")
+    if reply.get("state") == "FRAME_AVAILABLE":
+        frame = reply.get("frame")
+        if not isinstance(frame, dict) or not all(
+                isinstance(frame.get(name), str) and frame.get(name) for name in ("packet_id", "frame_sha256")):
+            raise FederationGatewayTransportError("gateway frame names no acknowledgeable packet")
+    return reply
 
 
 def submit_frame(frame: dict[str, Any]) -> dict[str, Any]:
