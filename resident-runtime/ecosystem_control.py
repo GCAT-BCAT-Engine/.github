@@ -6,8 +6,6 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 SPEC=importlib.util.spec_from_file_location("org_kernel",ROOT/"org-kernel"/"kernel.py")
 K=importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(K)
-GWSPEC=importlib.util.spec_from_file_location("federation_gateway_transport",ROOT/"resident-runtime"/"federation_gateway_transport.py")
-GW=importlib.util.module_from_spec(GWSPEC); GWSPEC.loader.exec_module(GW)
 RETRY_ENTRYPOINT="resident-runtime/ecosystem_control.py::main"
 
 def main():
@@ -48,10 +46,7 @@ def _main():
         print(json.dumps(status,indent=2,sort_keys=True))
         return
     if args.cmd=="collect":
-        if os.getenv("STEGVERSE_ORG_FEDERATION_GATEWAY_URL","").strip():
-            result=GW.collect_local_responses(ROOT,args.communication_id)
-        else:
-            result=K.collect_ecosystem_responses(org,args.communication_id)
+        result=K.collect_ecosystem_responses(org,args.communication_id)
         print(json.dumps(result,indent=2,sort_keys=True))
         return
     # A published frame references the supplied --hb-epoch, checked by the
@@ -63,26 +58,15 @@ def _main():
         print(json.dumps(exc.refusal,sort_keys=True))
         raise SystemExit(1)
     body=K.read_json_input(args.body_json,argument="--body-json",inline=True,retry_entrypoint=RETRY_ENTRYPOINT)
-    if os.getenv("STEGVERSE_ORG_FEDERATION_GATEWAY_URL","").strip():
-        out=GW.publish_ecosystem_via_gateway(
-            repo_root=ROOT,
-            message_class=args.message_class,
-            subject=args.subject,
-            body=body,
-            requested_action=args.requested_action,
-            communication_id=args.communication_id,
-            epoch=epoch
-        )
-    else:
-        out=K.publish_ecosystem_from_directory(
-            ROOT,
-            message_class=args.message_class,
-            subject=args.subject,
-            body=body,
-            requested_action=args.requested_action,
-            communication_id=args.communication_id,
-            epoch=epoch
-        )
+    out=K.publish_ecosystem_from_directory(
+        ROOT,
+        message_class=args.message_class,
+        subject=args.subject,
+        body=body,
+        requested_action=args.requested_action,
+        communication_id=args.communication_id,
+        epoch=epoch
+    )
     print(json.dumps({
       "status":"PUBLISHED",
       "organization":org,

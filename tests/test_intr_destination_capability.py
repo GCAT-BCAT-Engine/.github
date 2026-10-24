@@ -817,9 +817,6 @@ class CopiedRepository(RedirectedLedgers):
         os.environ["STEGVERSE_ORG_FEDERATION_ROOT"] = str(self.mesh)
         self.addCleanup(lambda: os.environ.__setitem__("STEGVERSE_ORG_FEDERATION_ROOT", previous)
                         if previous is not None else os.environ.pop("STEGVERSE_ORG_FEDERATION_ROOT", None))
-        gateway = os.environ.pop("STEGVERSE_ORG_FEDERATION_GATEWAY_URL", None)
-        if gateway is not None:
-            self.addCleanup(os.environ.__setitem__, "STEGVERSE_ORG_FEDERATION_GATEWAY_URL", gateway)
 
     def runtime(self):
         module = _module("organization_runtime_probe", "runtime/organization_runtime.py")
@@ -911,7 +908,7 @@ class ClockMarkerAndRuntimeEpochTests(CopiedRepository):
         fixed = datetime.fromtimestamp(self.CLOCK_NS / 1_000_000_000, timezone.utc)
         clock = mock.Mock(wraps=datetime)
         clock.now = mock.Mock(return_value=fixed)
-        for module in (cycle, cycle.K, cycle.GW):
+        for module in (cycle, cycle.K):
             if getattr(module, "datetime", None) is datetime:
                 patcher = mock.patch.object(module, "datetime", clock)
                 patcher.start()
@@ -1104,7 +1101,7 @@ class CarriedEpochAndCollisionTests(CopiedRepository):
 
     def test_the_cycle_stamps_its_record_and_responses_from_the_supplied_epoch(self):
         cycle = self.cycle()
-        clock = self.unavailable_clock(cycle, cycle.K, cycle.GW)
+        clock = self.unavailable_clock(cycle, cycle.K)
         self.monitor_request("BOUNDARY_LOCAL_CONTROL", "probe-cycle-monitor")
         with mock.patch("builtins.print"):
             self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
@@ -1173,7 +1170,7 @@ class MarkerVocabularyTests(CopiedRepository):
         cycle = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
             "federation_cycle_vocabulary", self.copy / "resident-runtime/federation_cycle.py"))
         cycle.__spec__.loader.exec_module(cycle)
-        for module in (kernel, cycle.K, cycle.GW):
+        for module in (kernel, cycle.K):
             if hasattr(module, "datetime"):
                 patcher = mock.patch.object(module, "datetime", clock)
                 patcher.start()
@@ -1257,7 +1254,7 @@ class FrameEpochReachesTheOperationTests(CopiedRepository):
     def test_the_cycle_carries_a_capability_frames_epoch_to_the_operation(self):
         self.publish(ADDRESS, diagnostic("probe-g4-cycle"), "probe-g4-cycle")
         cycle = self.cycle()
-        clock = self.unavailable_clock(cycle, cycle.K, cycle.GW)
+        clock = self.unavailable_clock(cycle, cycle.K)
         with mock.patch("builtins.print"):
             self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
         self.assertFalse(clock.now.called)
@@ -1284,7 +1281,7 @@ class FrameEpochReachesTheOperationTests(CopiedRepository):
             key: value for key, value in supplied["heartbeat_reference"].items()
             if key != "derived_from_clock"}}), root=self.mesh)
         cycle = self.cycle()
-        clock = self.unavailable_clock(cycle, cycle.K, cycle.GW)
+        clock = self.unavailable_clock(cycle, cycle.K)
         with mock.patch("builtins.print"):
             self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
         record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
@@ -1503,8 +1500,7 @@ class NarrowClockFlagAndEpochConflictTests(CopiedRepository):
 
     A clock-flagged frame is consumed and lends no epoch; a route that needs
     one refuses NOT_SUPPLIED. A supplied epoch that differs from the frame's is
-    HB_EPOCH_CONFLICT and nothing is written. The gateway acknowledgement is
-    stamped from the cycle epoch, never the clock.
+    HB_EPOCH_CONFLICT and nothing is written.
     """
 
     def frame(self, service, payload, packet_id, *, epoch=4096, **reference):
@@ -1648,59 +1644,6 @@ class NarrowClockFlagAndEpochConflictTests(CopiedRepository):
                                        "stegverse.repo-transition-receipt/v1"), [])
         self.assertFalse(any(":response:" in json.loads(path.read_text(encoding="utf-8"))["packet_id"]
                              for path in (self.mesh / "frames.d").glob("*.json")))
-
-    def gateway(self, fetched):
-        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
-            "gateway_probe", self.copy / "resident-runtime/federation_gateway_transport.py"))
-        module.__spec__.loader.exec_module(module)
-        sent = []
-        patchers = [mock.patch.object(module, "fetch_frame", return_value=fetched),
-                    mock.patch.object(module, "submit_frame", side_effect=lambda frame: sent.append(frame) or {}),
-                    mock.patch.object(module, "_json_request",
-                                      side_effect=lambda method, path, body=None, headers=None:
-                                      sent.append(body) or {"state": (body or {}).get("state")})]
-        for patcher in patchers:
-            patcher.start()
-            self.addCleanup(patcher.stop)
-        return module, sent
-
-    def test_the_gateway_acknowledgement_is_stamped_from_the_cycle_epoch(self):
-        services = self.services()
-        frame = self.frame(services["BOUNDARY_LOCAL_CONTROL"], {"communication_id": "probe-gateway",
-                                                                "message_class": "ecosystem.monitor.request",
-                                                                "subject": "probe", "body": {}},
-                           "probe-gateway")
-        gateway, sent = self.gateway({"state": "FRAME_AVAILABLE", "frame": frame})
-        clock = self.unavailable_clock(gateway, gateway.K)
-        result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-        self.assertEqual((result["state"], result["responses_emitted"]), ("CONSUMED", 1))
-        response, ack = sent
-        self.assertEqual(response["heartbeat_reference"]["epoch"], 4096)
-        self.assertNotIn("observed_at", ack)
-        self.assertEqual((ack["hb_reference"]["epoch"], ack["hb_reference"]["derived_from_clock"]), (4096, False))
-        self.assertFalse(clock.now.called)
-
-    def test_a_refused_gateway_frame_is_acknowledged_terminal_without_the_clock(self):
-        frame = self.frame(self.services()["BOUNDARY_LOCAL_DIAGNOSTIC"], {"probe": 1}, "probe-gateway-refused",
-                           sampled_unix_ns=self.CLOCK_NS)
-        gateway, sent = self.gateway({"state": "FRAME_AVAILABLE", "frame": frame})
-        result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-        self.assertEqual(result["state"], "REFUSED")
-        self.assertEqual(result["refusal"]["failure_code"], "FRAME_REFUSED_QUARANTINED")
-        ack, = sent
-        self.assertEqual(ack["state"], "BLOCKED")
-        self.assertEqual(ack["refusal"]["refused_failure_code"], "HB_EPOCH_INVALID")
-        self.assertEqual(ack["hb_reference"]["epoch"], 4096)
-        self.assertNotIn(str(self.CLOCK_NS), json.dumps(ack))
-
-    def test_the_gateway_cycle_refuses_without_an_epoch_before_fetching(self):
-        gateway, sent = self.gateway({"state": "NO_FRAME"})
-        with self.assertRaises(gateway.K.SuppliedEpochRefused) as refused:
-            gateway.resident_gateway_cycle(self.copy)
-        self.assertEqual(refused.exception.refusal["failure_code"], "HB_EPOCH_NOT_SUPPLIED")
-        gateway.fetch_frame.assert_not_called()
-        self.assertEqual(sent, [])
-
 
 class CarriedProvenanceDownstreamTests(CopiedRepository):
     """B-P36m: a verified CARRIED claim reaches every receipt and status made in response.
@@ -2116,7 +2059,7 @@ class InTreeDispatcherTests(CopiedRepository):
         digest = "sha256:" + hashlib.sha256((self.copy / self.REQUEST).read_bytes()).hexdigest()
         self.assertEqual(record["committed_request"],
                          {"path": self.REQUEST, "sha256": digest, "hb_epoch_source": "COMMITTED_REQUEST"})
-        self.assertEqual(record["transport"], "LOCAL_SPOOL_FALLBACK")
+        self.assertEqual(record["transport"], "REPOSITORY_LOCAL_SPOOL")
         self.assertEqual(json.loads(status.stdout)["heartbeat_reference"]["epoch"], 4096)
 
     def test_the_dispatcher_refuses_an_absent_or_invalid_request_epoch_before_any_entrypoint(self):
@@ -2136,17 +2079,23 @@ class InTreeDispatcherTests(CopiedRepository):
 
     def test_the_cycle_awaits_no_external_machine_and_no_always_on_receiver(self):
         """B-P40 (R-SCOPE 19:29Z): the resident cycle runs once per committed request over the
-        repository-local spool. No hosted gateway or resident process is a transition predicate."""
+        repository-local spool, the only route: the hosted gateway transport is removed (19:49Z
+        ruling (A)), and no resident process is a transition predicate."""
         manifest = json.loads(self.MANIFEST.read_text(encoding="utf-8"))
-        self.assertIs(manifest["federation_gateway_required_for_cross_host"], False)
-        self.assertEqual(manifest["federation_gateway_role"], "OPTIONAL_TRANSPORT_NOT_A_TRANSITION_PREDICATE")
+        self.assertEqual([key for key in manifest if "gateway" in key], [])
+        self.assertFalse((ROOT / "resident-runtime/federation_gateway_transport.py").exists())
+        for path in sorted(ROOT.rglob("*.py")) + sorted((ROOT / ".github/workflows").glob("*.yml")):
+            if ".git" in path.parts or path == Path(__file__).resolve():
+                continue
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("STEGVERSE_ORG_FEDERATION_GATEWAY_URL", text, str(path))
+            self.assertNotIn("federation_gateway_transport", text, str(path))
         self.assertEqual(manifest["federation_network_route"], "COMMITTED_TRANSITION_REPOSITORY_LOCAL_SPOOL")
         self.assertEqual(manifest["federation_poll_mode"], "NONE_ONE_CYCLE_PER_COMMITTED_REQUEST")
         activation = json.loads((ROOT / "org-runtime/activation.json").read_text(encoding="utf-8"))
         self.assertEqual(activation["runtime_execution_surface"], "COMMITTED_TRANSITION_CYCLE")
         for binding in self.bindings().values():
             text = (ROOT / binding["dispatcher"]).read_text(encoding="utf-8")
-            self.assertNotIn("STEGVERSE_ORG_FEDERATION_GATEWAY_URL", text)
             self.assertNotIn("http", text.lower().replace("https://github.com", ""))
 
     def test_the_cycle_refuses_a_malformed_committed_request_argument(self):
@@ -2394,21 +2343,6 @@ class TotalGuardAndDispatchIoTests(CopiedRepository):
         self.assertFalse(clock.now.called)
         self.assertEqual(self.run_cycle(cycle)["frames_seen"], 0)
 
-    def test_the_gateway_guard_is_total_too(self):
-        gateway = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
-            "gateway_total", self.copy / "resident-runtime/federation_gateway_transport.py"))
-        gateway.__spec__.loader.exec_module(gateway)
-        frame = self.rebound(self.capability_frame("probe-gateway-type"), packet_base64=123)
-        sent = []
-        with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
-                mock.patch.object(gateway, "_json_request",
-                                  side_effect=lambda method, path, body=None, headers=None:
-                                  sent.append(body) or {"state": (body or {}).get("state")}):
-            result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-        self.assertEqual(result["state"], "REFUSED")
-        self.assertEqual(result["refusal"]["refused_failure_code"], "FRAME_INGEST_FAILED")
-        self.assertEqual(sent[0]["state"], "BLOCKED")
-
     def test_an_io_failure_writing_this_boundarys_ledger_defers_the_frame_and_it_is_consumed_once(self):
         kernel.publish_frame(self.capability_frame("probe-io"), root=self.mesh)
         organization_root = str(Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]).resolve())
@@ -2438,23 +2372,6 @@ class TotalGuardAndDispatchIoTests(CopiedRepository):
         self.assertEqual(len(self.receipts("STEGVERSE_ORG_LEDGER_ROOT",
                                            "stegverse.organization-transition-receipt/v1")), 1)
         self.assertEqual(self.run_cycle(cycle)["frames_seen"], 0)
-
-    def test_the_gateway_defers_on_its_own_io_failure_without_acknowledging(self):
-        gateway = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
-            "gateway_io", self.copy / "resident-runtime/federation_gateway_transport.py"))
-        gateway.__spec__.loader.exec_module(gateway)
-        sent = []
-        with mock.patch.object(gateway, "fetch_frame",
-                               return_value={"state": "FRAME_AVAILABLE", "frame": self.capability_frame("probe-gw-io")}), \
-                mock.patch.object(gateway, "_json_request", side_effect=lambda *a, **k: sent.append(a) or {}), \
-                mock.patch.object(gateway.K, "ingest_frame", side_effect=OSError(5, "I/O error")):
-            result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-        self.assertEqual(result["state"], "DEFERRED")
-        self.assertEqual(result["refusal"]["failure_code"], "FRAME_DISPATCH_IO_FAILED")
-        for field in SuppliedEpochParsingTests.SIX_FIELDS:
-            self.assertIn(field, result["refusal"])
-        self.assertEqual(sent, [])
-
 
 class DispatcherFindingTests(unittest.TestCase):
     """08:43Z bar: the manifest that denies GitHub Actions runtime authority records its dispatcher finding."""
@@ -2713,40 +2630,6 @@ class ResponsePublishedOnceTests(CopiedRepository):
         self.assertEqual(json.loads(latest.read_text(encoding="utf-8"))["frames_seen"], 0)
         self.assertEqual(len(self.response_frames()), 1)
 
-    def test_an_ack_failure_after_the_gateway_response_gives_exactly_one_response(self):
-        gateway = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
-            "gateway_repub", self.copy / "resident-runtime/federation_gateway_transport.py"))
-        gateway.__spec__.loader.exec_module(gateway)
-        packet = kernel.build_packet(
-            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
-            destination_org=THIS, destination_service=ADDRESS, payload=diagnostic("probe-repub-ack"),
-            transition_reference="intr:transition:probe-repub-ack", authority_effect="NONE",
-            packet_id="probe-repub-ack")
-        frame = kernel.carrier_frame(packet, epoch=4096)
-        submitted, acks = [], []
-
-        def json_request(method, path, body=None, headers=None):
-            if path.endswith("/acknowledgements"):
-                acks.append(body)
-                if len(acks) == 1:
-                    raise OSError(104, "Connection reset by peer")
-                return {"state": body["state"]}
-            submitted.append(body)
-            return {"state": "PENDING"}
-
-        with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
-                mock.patch.object(gateway, "_json_request", side_effect=json_request):
-            first = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-            self.assertEqual(first["state"], "DEFERRED")
-            self.assertEqual((first["refusal"]["failure_code"], first["refusal"]["terminal"]),
-                             ("FRAME_DISPATCH_IO_FAILED", False))
-            second = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-        self.assertEqual((second["state"], second["responses_emitted"]), ("CONSUMED", 0))
-        self.assertEqual(len(submitted), 1)
-        self.assertEqual(len(acks), 2)
-        self.assertEqual(second["response_frame_sha256"], submitted[0]["frame_sha256"])
-
-
 class TornHeadWriteTests(CopiedRepository):
     """IO-TORN (VALIDATOR V-P11): an OSError writing HEAD after the receipt is published leaves the
     ledger appendable; the next cycle consumes the frame once, with no orphan."""
@@ -2935,56 +2818,6 @@ class MultiStepWriteResumableTests(CopiedRepository):
         for field in SuppliedEpochParsingTests.SIX_FIELDS:
             self.assertIn(field, refusal)
 
-    def gateway(self):
-        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
-            "gateway_resumable", self.copy / "resident-runtime/federation_gateway_transport.py"))
-        module.__spec__.loader.exec_module(module)
-        return module
-
-    def test_a_fault_at_each_gateway_response_step_submits_one_response(self):
-        steps = ("record before submit", "submit", "record after submit")
-        for index, step in enumerate(steps):
-            gateway = self.gateway()
-            packet = kernel.build_packet(
-                origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
-                destination_org=THIS, destination_service=ADDRESS,
-                payload=diagnostic("probe-gw-step-" + str(index)),
-                transition_reference="intr:transition:gw-step", authority_effect="NONE",
-                packet_id="probe-gw-step-" + str(index))
-            frame = kernel.carrier_frame(packet, epoch=4096)
-            submitted, writes = [], {"count": 0}
-            real_write = gateway.K.write_json_atomic
-
-            def write(path, value, step=step):
-                if "gateway-responses.d" in str(path):
-                    writes["count"] += 1
-                    if (step == "record before submit" and writes["count"] == 1) or \
-                            (step == "record after submit" and writes["count"] == 2):
-                        raise OSError(5, "I/O error")
-                return real_write(path, value)
-
-            def json_request(method, path, body=None, headers=None, step=step):
-                if path.endswith("/frames"):
-                    submitted.append(body)
-                    if step == "submit" and len(submitted) == 1:
-                        raise gateway.FederationGatewayTransportError("gateway request failed: reset")
-                    return {"state": "PENDING"}
-                return {"state": body["state"]}
-
-            with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
-                    mock.patch.object(gateway, "_json_request", side_effect=json_request), \
-                    mock.patch.object(gateway.K, "write_json_atomic", side_effect=write):
-                first = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-                self.assertEqual(first["state"], "DEFERRED", step)
-                self.assertIs(first["refusal"]["terminal"], False)
-                second = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-                third = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-            self.assertEqual(second["state"], "CONSUMED", step)
-            self.assertEqual(third["state"], "CONSUMED", step)
-            # One distinct response; a retried submission is the same bytes.
-            self.assertEqual(len({json.dumps(body, sort_keys=True) for body in submitted}), 1, step)
-            self.assertEqual(sum(1 for body in submitted if body) - (1 if step != "record before submit" else 0), 1, step)
-
     def test_a_torn_runtime_receipt_is_replaced_not_a_permanent_collision(self):
         runtime = _module("organization_runtime_torn", "runtime/organization_runtime.py")
         for name in ("ACTIVATIONS", "INGRESS", "EGRESS"):
@@ -3079,51 +2912,6 @@ class ResponseIdKeyingTests(CopiedRepository):
         self.assertEqual((record["frames_consumed"], record["responses_emitted"]), (1, 0))
         self.assertEqual(self.response_frames(), first)
         self.assertEqual(self.refused_markers(), [])
-
-    def gateway(self):
-        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
-            "gateway_keying", self.copy / "resident-runtime/federation_gateway_transport.py"))
-        module.__spec__.loader.exec_module(module)
-        return module
-
-    def gateway_frame(self, payload, packet_id):
-        packet = kernel.build_packet(
-            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
-            destination_org=THIS, destination_service=ADDRESS, payload=payload,
-            transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
-            packet_id=packet_id)
-        return kernel.carrier_frame(packet, epoch=4096)
-
-    def test_the_gateway_refuses_another_request_under_a_submitted_response_id(self):
-        gateway = self.gateway()
-        other = diagnostic("probe-gw-keying")
-        other["body"] = {**other["body"], "probe": "other-content"}
-        cases = [(self.gateway_frame(diagnostic("probe-gw-keying"), "probe-gw-a"), "CONSUMED"),
-                 (self.gateway_frame(other, "probe-gw-a"), "REFUSED"),
-                 (self.gateway_frame(diagnostic("probe-gw-keying"), "probe-gw-b"), "REFUSED")]
-        submitted, acks = [], []
-
-        def json_request(method, path, body=None, headers=None):
-            if path.endswith("/acknowledgements"):
-                acks.append(body)
-                return {"state": body["state"]}
-            submitted.append(body)
-            return {"state": "PENDING"}
-
-        before = None
-        for frame, state in cases:
-            with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
-                    mock.patch.object(gateway, "_json_request", side_effect=json_request):
-                result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-            self.assertEqual(result["state"], state)
-            if state == "REFUSED":
-                self.assert_collision(result["refusal"])
-                self.assertEqual(result["responses_emitted"], 0)
-                self.assertEqual(acks[-1]["state"], "BLOCKED")
-                self.assertEqual(self.ledger_files(), before)
-            before = self.ledger_files()
-        self.assertEqual(len(submitted), 1)
-
 
 class WriterTraceTests(CopiedRepository):
     """F-WRITER-TRACE (Lane B 09:50Z, V-P11): every epoch-taking writer CLI prints a non-terminal
@@ -3738,34 +3526,6 @@ class CarriedCrossingAdmissionRecordTests(CopiedRepository):
         self.assertEqual(sorted(str(path) for name in self.LEDGER_ROOTS
                                 for path in Path(os.environ[name]).rglob("*")), before)
 
-    def test_a_gateway_frame_offered_again_after_its_crossing_landed_is_replayed_not_refused(self):
-        gateway = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
-            "gateway_admission", self.copy / "resident-runtime/federation_gateway_transport.py"))
-        gateway.__spec__.loader.exec_module(gateway)
-        admitted = self.organization_head()
-        frame = self.carried_frame(ADDRESS, diagnostic("probe-admission-ack"), "probe-admission-ack",
-                                   source="ORGANIZATION_LEDGER_HEAD", head_receipt_sha=admitted)
-        submitted, acks = [], []
-
-        def json_request(method, path, body=None, headers=None):
-            if path.endswith("/acknowledgements"):
-                acks.append(body)
-                if len(acks) == 1:
-                    raise OSError(104, "Connection reset by peer")
-                return {"state": body["state"]}
-            submitted.append(body)
-            return {"state": "PENDING"}
-
-        with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
-                mock.patch.object(gateway, "_json_request", side_effect=json_request):
-            self.assertEqual(gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)["state"], "DEFERRED")
-            self.other_writer()
-            again = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-        self.assertEqual((again["state"], again["responses_emitted"]), ("CONSUMED", 0), again.get("refusal"))
-        self.assertEqual(acks[-1]["state"], "CONSUMED")
-        self.assertEqual(len(submitted), 1)
-        self.assert_crossing_landed("probe-admission-ack", admitted)
-
     def deferred_crossing(self, packet_id):
         """A CARRIED crossing admitted at H0 and deferred with its record open; the head then moves."""
         admitted = self.organization_head()
@@ -4020,7 +3780,7 @@ class ProcessBoundaryExitSplitTests(CopiedRepository):
 class DeepJsonFrameTests(CopiedRepository):
     """F-SCAN-RECURSION (VALIDATOR V-P11, frozen F-SCAN): a peer-writable frame nested past the JSON
     parser's depth is quarantined six-field FRAME_INGEST_FAILED, and the valid frame next to it is
-    consumed once in the same cycle, on the cycle and the gateway paths."""
+    consumed once in the same cycle."""
 
     cycle = TransientWriterFaultTests.cycle
     run_cycle = TransientWriterFaultTests.run_cycle
@@ -4061,237 +3821,6 @@ class DeepJsonFrameTests(CopiedRepository):
         repository = [r for r in self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
                       if (r.get("evidence") or {}).get("communication_id") == "probe-deep-neighbour"]
         self.assertEqual(len(repository), 1)
-
-    def gateway(self):
-        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
-            "gateway_deep", self.copy / "resident-runtime/federation_gateway_transport.py"))
-        module.__spec__.loader.exec_module(module)
-        return module
-
-    def test_the_gateway_quarantines_a_deep_packet_and_then_consumes_a_valid_frame(self):
-        gateway = self.gateway()
-        good = kernel.carrier_frame(kernel.build_packet(
-            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
-            destination_org=THIS, destination_service=ADDRESS, payload=diagnostic("probe-deep-gateway"),
-            transition_reference="intr:transition:probe-deep-gateway", authority_effect="NONE",
-            packet_id="probe-deep-gateway"), epoch=4096)
-        acks = []
-
-        def json_request(method, path, body=None, headers=None):
-            if path.endswith("/acknowledgements"):
-                acks.append(body)
-                return {"state": body["state"]}
-            return {"state": "PENDING"}
-
-        for frame, state in ((self.deep_packet_frame("probe-deep-gateway-packet"), "REFUSED"), (good, "CONSUMED")):
-            with mock.patch.object(gateway, "fetch_frame", return_value={"state": "FRAME_AVAILABLE", "frame": frame}), \
-                    mock.patch.object(gateway, "_json_request", side_effect=json_request):
-                result = gateway.resident_gateway_cycle(self.copy, hb_epoch=4096)
-            self.assertEqual(result["state"], state, result.get("refusal"))
-        self.assertEqual([ack["state"] for ack in acks], ["BLOCKED", "CONSUMED"])
-
-    def test_a_deep_gateway_response_is_a_non_terminal_six_field_record(self):
-        cycle = self.cycle()
-
-        class Response:
-            def __enter__(self):
-                return self
-            def __exit__(self, *exc):
-                return False
-            def read(self):
-                return DEEP_JSON.encode("utf-8")
-
-        with mock.patch.dict(os.environ, {"STEGVERSE_ORG_FEDERATION_GATEWAY_URL": "https://gateway.invalid"}), \
-                mock.patch.object(cycle.GW, "urlopen", return_value=Response()), \
-                mock.patch("builtins.print") as printed:
-            self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 1)
-        refusal = json.loads(printed.call_args.args[0])
-        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("GATEWAY_TRANSPORT_FAILED", False))
-
-    def raw_gateway(self, queue):
-        """A gateway that offers the head of `queue` and drops it when it is acknowledged by its
-        frame_raw_sha256; it records every ack and every submit."""
-        acks, submitted = [], []
-
-        class Response:
-            def __init__(self, body):
-                self.body = body.encode("utf-8")
-            def __enter__(self):
-                return self
-            def __exit__(self, *exc):
-                return False
-            def read(self):
-                return self.body
-
-        def urlopen(request, timeout=None):
-            if request.get_method() == "GET":
-                return Response(queue[0][0] if queue else json.dumps({"state": "NO_FRAME"}))
-            body = json.loads(request.data.decode("utf-8"))
-            if request.full_url.endswith("/acknowledgements"):
-                acks.append(body)
-                if queue and body.get("frame_raw_sha256") == queue[0][1]:
-                    queue.pop(0)
-                return Response(json.dumps({"state": body["state"]}))
-            submitted.append(body)
-            return Response(json.dumps({"state": "PENDING"}))
-        return urlopen, acks, submitted
-
-    def run_gateway_cycle(self, cycle, urlopen):
-        with mock.patch.dict(os.environ, {"STEGVERSE_ORG_FEDERATION_GATEWAY_URL": "https://gateway.invalid"}), \
-                mock.patch.object(cycle.GW, "urlopen", side_effect=urlopen), \
-                mock.patch("builtins.print") as printed:
-            code = cycle.main(["--hb-epoch", "4096"])
-        return code, printed
-
-    def test_an_unusable_frame_in_a_readable_envelope_is_acked_blocked_by_its_raw_digest(self):
-        """GATEWAY_SHALLOW_NO_HANDLE_FRAME_WEDGE (VALIDATOR V-P11 @9551332/@db7055b, parent ruling
-        19:23Z; D1): a frame offered in a readable envelope always has a handle, the digest of its
-        raw bytes. A frame that is not an object, names no string packet_id and frame_sha256, or is
-        nested past the parser's depth, is acked BLOCKED with a terminal six-field FRAME_INGEST_FAILED
-        carrying frame_raw_sha256 and any ids that read; it is never ingested, the gateway drops it,
-        and the valid frame behind it is consumed once. Through the real federation_cycle path."""
-        deep = "[" * 200000 + "]" * 200000
-        unusable = {
-            "list": ("[1,2]", {}),
-            "string": '"s"', "null": "null", "number": "7",
-            "no ids": '{"x":1}',
-            "no frame_sha256": ('{"packet_id":"probe-shallow-no-sha"}', {"packet_id": "probe-shallow-no-sha"}),
-            "non-string packet_id": '{"packet_id":7,"frame_sha256":"sha256:00"}',
-            "empty packet_id": '{"packet_id":"","frame_sha256":"sha256:00"}',
-            "deep, frame_sha256 only": ('{"frame_sha256":"sha256:' + "e" * 64 + '","heartbeat_reference":' + deep + "}",
-                                        {"frame_sha256": "sha256:" + "e" * 64}),
-            "deep array": deep,
-            "absent": None,
-        }
-        for index, (case, spec) in enumerate(unusable.items()):
-            raw, ids = spec if isinstance(spec, tuple) else (spec, {})
-            if case == "non-string packet_id" or case == "empty packet_id":
-                ids = {"frame_sha256": "sha256:00"}
-            with self.subTest(case=case):
-                cycle = self.cycle()
-                reply = '{"state":"FRAME_AVAILABLE"' + ("" if raw is None else ',"frame":' + raw) + "}"
-                raw_sha = "sha256:" + hashlib.sha256((raw or "").encode("utf-8")).hexdigest()
-                packet_id = "probe-unusable-next-%d" % index
-                valid = kernel.carrier_frame(kernel.build_packet(
-                    origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
-                    destination_org=THIS, destination_service=ADDRESS, payload=diagnostic(packet_id),
-                    transition_reference="intr:transition:" + packet_id, authority_effect="NONE",
-                    packet_id=packet_id), epoch=4096)
-                valid_text = json.dumps(valid, separators=(",", ":"))
-                valid_raw_sha = "sha256:" + hashlib.sha256(valid_text.encode("utf-8")).hexdigest()
-                queue = [(reply, raw_sha), ('{"state":"FRAME_AVAILABLE","frame":' + valid_text + "}", valid_raw_sha)]
-                urlopen, acks, submitted = self.raw_gateway(queue)
-
-                code, _ = self.run_gateway_cycle(cycle, urlopen)
-                self.assertEqual(code, 0)
-                first = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text(encoding="utf-8"))
-                self.assertEqual((first["state"], first["frames_consumed"], first["frame_raw_sha256"]),
-                                 ("REFUSED", 0, raw_sha))
-                self.assertEqual(len(acks), 1)
-                ack = acks[0]
-                self.assertEqual((ack["state"], ack["frame_raw_sha256"]), ("BLOCKED", raw_sha))
-                self.assertEqual((ack["packet_id"], ack["frame_sha256"]),
-                                 (ids.get("packet_id"), ids.get("frame_sha256")))
-                refusal = ack["refusal"]
-                self.assertEqual((refusal["disposition"], refusal["failure_code"], refusal["refused_failure_code"],
-                                  refusal["terminal"]),
-                                 ("FAIL_CLOSED", "FRAME_REFUSED_QUARANTINED", "FRAME_INGEST_FAILED", True))
-                for field in ("failed_predicate", "required_evidence_or_repair", "retry_entrypoint",
-                              "owning_existing_goal", "next_attempt"):
-                    self.assertTrue(refusal[field], field)
-
-                self.assertEqual(self.run_gateway_cycle(cycle, urlopen)[0], 0)
-                second = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text(encoding="utf-8"))
-                self.assertEqual((second["state"], second["frames_consumed"], second["responses_emitted"]),
-                                 ("CONSUMED", 1, 1))
-                self.assertEqual((acks[1]["state"], acks[1]["packet_id"], acks[1]["frame_raw_sha256"]),
-                                 ("CONSUMED", packet_id, valid_raw_sha))
-                self.assertEqual(self.run_gateway_cycle(cycle, urlopen)[0], 0)
-                self.assertEqual(len(acks), 2)
-                self.assertEqual(len(submitted), 1)
-                repository = [r for r in self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
-                              if (r.get("evidence") or {}).get("communication_id") == packet_id]
-                self.assertEqual(len(repository), 1)
-
-    def test_an_unreadable_or_non_object_envelope_stays_a_non_terminal_six_field_record(self):
-        """Only a reply this boundary cannot read as an envelope (not an object, unterminated, or a
-        FRAME_AVAILABLE envelope it cannot split) has no frame to acknowledge: it is the non-terminal
-        GATEWAY_TRANSPORT_FAILED, rc 1, nothing acknowledged or written, and no raw exception."""
-        cycle = self.cycle()
-        for reply in ("[1,2]", '"FRAME_AVAILABLE"', '{"state":"FRAME_AVAILABLE","frame":{"packet_id":"x"',
-                      '{"state":"FRAME_AVAILABLE","frame":' + "[" * 200000):
-            urlopen, acks, submitted = self.raw_gateway([(reply, None)])
-            with self.subTest(reply=reply[:60]):
-                code, printed = self.run_gateway_cycle(cycle, urlopen)
-                self.assertEqual(code, 1)
-                refusal = json.loads(printed.call_args.args[0])
-                self.assertEqual((refusal["disposition"], refusal["failure_code"], refusal["terminal"]),
-                                 ("FAIL_CLOSED", "GATEWAY_TRANSPORT_FAILED", False))
-                self.assertEqual((acks, submitted), ([], []))
-
-    def test_the_cycle_acks_a_deep_frame_in_a_readable_envelope_blocked_and_consumes_the_next(self):
-        """GATEWAY_DEEP_FRAME_WEDGE (VALIDATOR V-P11 @ef82cd7): through the real federation_cycle gateway
-        path, a frame nested past the parser's depth inside a readable envelope is acked BLOCKED with
-        six-field FRAME_INGEST_FAILED, so the gateway drops it; the valid frame behind it is consumed once."""
-        cycle = self.cycle()
-        deep_sha = "sha256:" + "d" * 64
-        deep_reply = ('{"state":"FRAME_AVAILABLE","frame":{"packet_id":"probe-deep-gw-frame","frame_sha256":"'
-                      + deep_sha + '","heartbeat_reference":' + "[" * 200000 + "]" * 200000 + "}}")
-        valid = kernel.carrier_frame(kernel.build_packet(
-            origin_org=PEER, origin_service=kernel.organization_slug(PEER) + ".org-control",
-            destination_org=THIS, destination_service=ADDRESS, payload=diagnostic("probe-deep-gw-next"),
-            transition_reference="intr:transition:probe-deep-gw-next", authority_effect="NONE",
-            packet_id="probe-deep-gw-next"), epoch=4096)
-        queue = [deep_reply, json.dumps({"state": "FRAME_AVAILABLE", "frame": valid}),
-                 json.dumps({"state": "NO_FRAME"})]
-        acks, submitted = [], []
-
-        class Response:
-            def __init__(self, body):
-                self.body = body.encode("utf-8")
-            def __enter__(self):
-                return self
-            def __exit__(self, *exc):
-                return False
-            def read(self):
-                return self.body
-
-        def urlopen(request, timeout=None):
-            if request.get_method() == "GET":
-                return Response(queue[0])
-            body = json.loads(request.data.decode("utf-8"))
-            if request.full_url.endswith("/acknowledgements"):
-                acks.append(body)
-                # The gateway drops the frame it was acknowledged for.
-                if queue and (body["packet_id"] in queue[0]):
-                    queue.pop(0)
-                return Response(json.dumps({"state": body["state"]}))
-            submitted.append(body)
-            return Response(json.dumps({"state": "PENDING"}))
-
-        def run():
-            with mock.patch.dict(os.environ, {"STEGVERSE_ORG_FEDERATION_GATEWAY_URL": "https://gateway.invalid"}), \
-                    mock.patch.object(cycle.GW, "urlopen", side_effect=urlopen), \
-                    mock.patch("builtins.print"):
-                self.assertEqual(cycle.main(["--hb-epoch", "4096"]), 0)
-            return json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text(encoding="utf-8"))
-
-        first = run()
-        self.assertEqual((first["state"], first["frames_consumed"]), ("REFUSED", 0))
-        self.assertEqual((acks[0]["packet_id"], acks[0]["frame_sha256"], acks[0]["state"]),
-                         ("probe-deep-gw-frame", deep_sha, "BLOCKED"))
-        self.assertEqual((acks[0]["refusal"]["failure_code"], acks[0]["refusal"]["refused_failure_code"],
-                          acks[0]["refusal"]["terminal"]), ("FRAME_REFUSED_QUARANTINED", "FRAME_INGEST_FAILED", True))
-        second = run()
-        self.assertEqual((second["state"], second["frames_consumed"], second["responses_emitted"]), ("CONSUMED", 1, 1))
-        self.assertEqual(acks[1]["state"], "CONSUMED")
-        self.assertEqual(run()["state"], "NO_FRAME")
-        self.assertEqual(len(submitted), 1)
-        repository = [r for r in self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
-                      if (r.get("evidence") or {}).get("communication_id") == "probe-deep-gw-next"]
-        self.assertEqual(len(repository), 1)
-
-
 
 class CommittedRequestPushWriterTests(RedirectedLedgers):
     """The 09:20Z COMMITTED_REQUEST rule, (b): the push writer (organization-ledger-transition.yml
