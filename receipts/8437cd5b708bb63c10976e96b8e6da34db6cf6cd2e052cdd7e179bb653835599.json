@@ -1,0 +1,38 @@
+{
+  "authority_effect": "NONE",
+  "boundary_evidence": {
+    "communication_id": "intr-path-v1:GCAT-BCAT-Engine->AdmittedCode",
+    "destination_organization": "AdmittedCode",
+    "disposition": "ALLOW",
+    "operation": "INTR_MESH_PATH_TRANSFER",
+    "path_id": "GCAT-BCAT-Engine->AdmittedCode:intr-destination",
+    "profile_id": "intr-mesh-path-transfer",
+    "repository": "GCAT-BCAT-Engine/.github",
+    "transfer_commit": "e8e78fe42cc880f922d0178909a9e82db5687d4d"
+  },
+  "canonical_state_transition_receipt_sha256": null,
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "derived_from_clock": false,
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 0,
+    "progression_dependency": "OSCILLATOR_ONLY"
+  },
+  "org_transition_class": "REPO_STATE_PROPAGATION",
+  "organization": "GCAT-BCAT-Engine",
+  "predecessor_org_state_sha256": "sha256:3da2ea527284166b88a3a51d0266fab2aea766130b7f44800985689e98fff4ab",
+  "previous_receipt_sha256": "sha256:a564bdcd8e3df16d414415cdebaa83cce63adff9715cdf1e1b769982033c4548",
+  "receipt_sha256": "sha256:8437cd5b708bb63c10976e96b8e6da34db6cf6cd2e052cdd7e179bb653835599",
+  "repo_receipt_sha256": "sha256:554dc215aa8f2d4ea88a46b9813b339bc104e2bdb3a164bb324ad9638c6f12d4",
+  "repo_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->AdmittedCode:intr-destination@intr-path-v1:GCAT-BCAT-Engine->AdmittedCode",
+  "schema": "stegverse.organization-transition-receipt/v1",
+  "source_receipt_schema": "stegverse.repo-transition-receipt/v1",
+  "source_repository": "GCAT-BCAT-Engine/.github",
+  "source_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->AdmittedCode:intr-destination@intr-path-v1:GCAT-BCAT-Engine->AdmittedCode",
+  "source_transition_sha256": "sha256:554dc215aa8f2d4ea88a46b9813b339bc104e2bdb3a164bb324ad9638c6f12d4",
+  "subject_or_correlation_id": null,
+  "successor_org_state_sha256": "sha256:94096526055bfbdcbadf0dcc436f6f0be40e2d3913e25cc146443fefb3776094"
+}
