@@ -65,6 +65,7 @@ BOUND_RECEIPT_UNREADABLE = "BOUND_RECEIPT_UNREADABLE"
 COMMITTED_REQUEST_REPLAY_MISMATCH = "COMMITTED_REQUEST_REPLAY_MISMATCH"
 COMMITTED_REQUEST_BINDING_ABSENT = "COMMITTED_REQUEST_BINDING_ABSENT"
 COMMITTED_REQUEST_BINDING_WRITE_FAILED = "COMMITTED_REQUEST_BINDING_WRITE_FAILED"
+COMMITTED_REQUEST_BINDING_READ_FAILED = "COMMITTED_REQUEST_BINDING_READ_FAILED"
 
 
 class BindingRefused(ValueError):
@@ -76,8 +77,11 @@ class BindingRefused(ValueError):
 
 
 class BindingWriteFault(RuntimeError):
-    """This boundary's own write of a binding faulted: six fields, not terminal.
+    """This boundary's own ledger faulted while binding: six fields, not terminal.
 
+    A write fault, or (`read=True`) a fault reading back this boundary's own
+    ledger: an OSError, or, where the receipts were just written by this same
+    transition (`own_writes`), a torn or unreadable bindings chain or receipt.
     `writer_fault` makes the kernel defer the frame rather than quarantine it,
     as for any ledger writer's own fault. The write is atomic and the binding
     content-addressed, so the same call run again completes it exactly once.
@@ -85,13 +89,16 @@ class BindingWriteFault(RuntimeError):
 
     writer_fault = True
 
-    def __init__(self, exc: BaseException):
-        super().__init__(COMMITTED_REQUEST_BINDING_WRITE_FAILED + ": " + type(exc).__name__ + ": " + str(exc))
+    def __init__(self, exc: BaseException, *, read: bool = False):
+        code = COMMITTED_REQUEST_BINDING_READ_FAILED if read else COMMITTED_REQUEST_BINDING_WRITE_FAILED
+        super().__init__(code + ": " + type(exc).__name__ + ": " + str(exc))
         self.refusal = {
-            "disposition": "FAIL_CLOSED", "failure_code": COMMITTED_REQUEST_BINDING_WRITE_FAILED, "terminal": False,
-            "failed_predicate": "THIS_BOUNDARY_RECORDS_ITS_OWN_BINDING",
+            "disposition": "FAIL_CLOSED", "failure_code": code, "terminal": False,
+            "failed_predicate": ("THIS_BOUNDARY_READS_ITS_OWN_LEDGER_BACK" if read
+                                 else "THIS_BOUNDARY_RECORDS_ITS_OWN_BINDING"),
             "detail": type(exc).__name__ + ": " + str(exc)[:300],
-            "required_evidence_or_repair": "this boundary's own ledger storage accepts the binding",
+            "required_evidence_or_repair": ("this boundary's own ledger reads back as written" if read
+                                            else "this boundary's own ledger storage accepts the binding"),
             "retry_entrypoint": RETRY_ENTRYPOINT, "owning_existing_goal": GOAL,
             "next_attempt": ("run the same binding again: it is content-addressed, so the rerun returns the "
                              "recorded binding or writes it once, never a second"),
@@ -102,7 +109,9 @@ def _get(store: Any, key: str, what: str) -> Any:
     """A document read back, or a six-field refusal for a torn or unreadable one; never a traceback."""
     try:
         return store.get(key)
-    except (*K.JSON_DOCUMENT_ERRORS, OSError) as exc:
+    except OSError as exc:
+        raise BindingWriteFault(exc, read=True) from None
+    except K.JSON_DOCUMENT_ERRORS as exc:
         raise _refuse(COMMITTED_REQUEST_BINDING_ABSENT, "EVERY_LEDGER_DOCUMENT_READS_BACK",
                       what + " " + key + " is torn or unreadable: " + type(exc).__name__,
                       "restore the document as written; a torn binding HEAD is never read as no binding") from None
@@ -143,7 +152,9 @@ def _receipt(store: Any, digest: Any, ledger: str) -> dict[str, Any]:
     """A receipt read back by its address, verified against its own body, or BOUND_RECEIPT_UNREADABLE."""
     try:
         receipt = store.get(S.receipt_key(digest)) if isinstance(digest, str) and digest.startswith("sha256:") else None
-    except (*K.JSON_DOCUMENT_ERRORS, OSError) as exc:
+    except OSError as exc:
+        raise BindingWriteFault(exc, read=True) from None
+    except K.JSON_DOCUMENT_ERRORS as exc:
         receipt, digest = None, str(digest) + " (" + type(exc).__name__ + ")"
     body = {key: value for key, value in (receipt or {}).items() if key != "receipt_sha256"}
     if not isinstance(receipt, dict) or receipt.get("receipt_sha256") != digest or K.sha(body) != digest:
@@ -205,6 +216,18 @@ def stores(org_store: Any = None, repo_store: Any = None) -> tuple[Any, Any]:
             repo_store or supplied("STEGVERSE_REPO_LEDGER_ROOT"))
 
 
+def preflight(org_store: Any = None) -> None:
+    """Before a transition writes the receipts it will bind: this boundary's own bindings chain
+    and organization HEAD read back. A torn or unreadable one is a non-terminal
+    COMMITTED_REQUEST_BINDING_READ_FAILED, so nothing is written that could not then be bound."""
+    org_store = org_store if org_store is not None else stores()[0]
+    try:
+        chain(org_store)
+        _get(org_store, S.HEAD_KEY, "the organization HEAD")
+    except BindingRefused as exc:
+        raise BindingWriteFault(exc, read=True) from None
+
+
 def tip(org_store: Any) -> str | None:
     """The commit the organization ledger ref names now (git), or None (POSIX, or never written)."""
     return org_store._tip() if isinstance(org_store, S.GitLedgerStore) else None
@@ -245,8 +268,22 @@ def _write(org_store: Any, documents: dict[str, Any], expected_head: Any, since_
 
 
 def bind(request: Any, *, repository_receipt_sha256: str, organization_receipt_sha256: str, hb_epoch: Any,
-         org_store: Any = None, repo_store: Any = None, since_tip: str | None = None) -> dict[str, Any]:
-    """Append the binding for one transition, or return the recorded one; six-field refusals write nothing."""
+         org_store: Any = None, repo_store: Any = None, since_tip: str | None = None,
+         own_writes: bool = False) -> dict[str, Any]:
+    """Append the binding for one transition, or return the recorded one; six-field refusals write nothing.
+
+    `own_writes`: the receipts were just written by this same transition (the cycle path), so a
+    bound receipt or bindings chain that does not read back is this boundary's own ledger fault,
+    non-terminal COMMITTED_REQUEST_BINDING_READ_FAILED, and the retried transition binds once."""
+    if own_writes:
+        try:
+            return bind(request, repository_receipt_sha256=repository_receipt_sha256,
+                        organization_receipt_sha256=organization_receipt_sha256, hb_epoch=hb_epoch,
+                        org_store=org_store, repo_store=repo_store, since_tip=since_tip)
+        except BindingRefused as exc:
+            if exc.refusal["failure_code"] in (BOUND_RECEIPT_UNREADABLE, COMMITTED_REQUEST_BINDING_ABSENT):
+                raise BindingWriteFault(exc, read=True) from None
+            raise
     request = committed_request(request)
     try:
         epoch = K.supplied_hb_reference(hb_epoch, retry_entrypoint=RETRY_ENTRYPOINT + "::bind (hb_epoch)")["epoch"]

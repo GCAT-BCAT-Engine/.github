@@ -288,7 +288,7 @@ def main():
                     org_store=open_store(locator),
                     repo_store=open_store(str(locator) + ":" + (args.repository_namespace or "")),
                     expected=[(args.committed_request, (ingress or {}).get("organization_receipt_sha256"))])
-            except binder.BindingRefused as refused:
+            except (binder.BindingRefused, binder.BindingWriteFault) as refused:
                 result, code = {"schema": "stegverse.organization-ledger-readback/v1", "location": args.location,
                                 **refused.refusal, "authority_effect": "NONE_READBACK_ONLY"}, 1
     except (ReadbackRefused, ValueError, RuntimeError, FileNotFoundError) as exc:

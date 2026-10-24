@@ -2514,6 +2514,97 @@ class TransientWriterFaultTests(CopiedRepository):
         self.assert_deferred_then_once(os.environ["STEGVERSE_ORG_LEDGER_ROOT"], "probe-lost-org", 0)
 
 
+class CycleBindFaultTests(CopiedRepository):
+    """V-P11 @042a986 row 1, CYCLE_BIND_TERMINAL_AFTER_INTR_WRITE: on the cycle path the InTr receipts
+    are written before the companion binding. A fault reading this boundary's own ledger back while
+    binding is non-terminal (COMMITTED_REQUEST_BINDING_READ_FAILED, a writer fault the kernel defers as
+    FRAME_DISPATCH_WRITE_FAILED): the frame is deferred, and the
+    retry binds exactly once. A torn bindings chain is read back before the receive, so it defers the
+    frame with nothing written."""
+
+    REQUEST = ".stegverse/resident-federation/cycle-request.json=sha256:" + "e" * 64
+
+    def setUp(self):
+        super().setUp()
+        self.eio = False
+        test = self
+        org_root = Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]).resolve()
+
+        def failing(original):
+            def get(store, key):
+                if test.eio and key.startswith("receipts/") and Path(store.root).resolve() == org_root and any(
+                        frame.filename.endswith("committed_request_binding.py") for frame in inspect.stack()):
+                    test.eio = False
+                    raise OSError(5, "Input/output error")
+                return original(store, key)
+            get.__wrapped_original__ = original
+            return get
+
+        def patch_store_classes(module):
+            store = getattr(module, "PosixLedgerStore", None)
+            if store is not None and not hasattr(store.get, "__wrapped_original__"):
+                original = store.get
+                store.get = failing(original)
+                self.addCleanup(setattr, store, "get", original)
+
+        for module in list(sys.modules.values()):
+            patch_store_classes(module)
+        real_exec = importlib.machinery.SourceFileLoader.exec_module
+
+        def exec_module(loader, module):
+            real_exec(loader, module)
+            patch_store_classes(module)
+        patcher = mock.patch.object(importlib.machinery.SourceFileLoader, "exec_module", exec_module)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        module = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "federation_cycle_bind_fault", self.copy / "resident-runtime/federation_cycle.py"))
+        module.__spec__.loader.exec_module(module)
+        self.cycle = module
+
+    def run_cycle(self):
+        with mock.patch("builtins.print"):
+            self.assertEqual(self.cycle.main(["--hb-epoch", "4096", "--committed-request", self.REQUEST]), 0)
+        return json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+
+    def counts(self):
+        return tuple(len(self.receipts(variable, schema)) for variable, schema in (
+            ("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1"),
+            ("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1"),
+            ("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.committed-request-binding-receipt/v1")))
+
+    def assert_deferred(self, record):
+        self.assertEqual((record["frames_consumed"], record["frames_refused"], record["frames_deferred"]), (0, 0, 1))
+        refusal, = record["deferrals"]
+        # The kernel's writer-fault deferral, naming the binder's own non-terminal read fault.
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("FRAME_DISPATCH_WRITE_FAILED", False))
+        self.assertIn("COMMITTED_REQUEST_BINDING_READ_FAILED", refusal["detail"])
+        for field in SuppliedEpochParsingTests.SIX_FIELDS:
+            self.assertIn(field, refusal)
+
+    def test_a_read_fault_on_the_binding_read_back_defers_and_the_retry_binds_once(self):
+        self.publish(ADDRESS, diagnostic("probe-bind-eio"), "probe-bind-eio")
+        self.eio = True
+        self.assert_deferred(self.run_cycle())
+        self.assertFalse(self.eio, "the read-back fault was injected")
+        self.assertEqual(self.counts(), (1, 1, 0))
+        record = self.run_cycle()
+        self.assertEqual((record["frames_consumed"], record["frames_deferred"]), (1, 0))
+        self.assertEqual(self.counts(), (1, 1, 1))
+
+    def test_a_torn_bindings_head_defers_before_any_receipt_is_written(self):
+        self.publish(ADDRESS, diagnostic("probe-bind-torn"), "probe-bind-torn")
+        head = Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]) / "committed-request-bindings" / "HEAD.json"
+        head.parent.mkdir(parents=True, exist_ok=True)
+        head.write_text('{"binding_sha256": "sha')
+        self.assert_deferred(self.run_cycle())
+        head.unlink()
+        self.assertEqual(self.counts(), (0, 0, 0))
+        record = self.run_cycle()
+        self.assertEqual((record["frames_consumed"], record["frames_deferred"]), (1, 0))
+        self.assertEqual(self.counts(), (1, 1, 1))
+
+
 class CarriedWriterVerificationTests(CopiedRepository):
     """B-P36m writers (lead 09:00Z, VALIDATOR V-P11): outside an admitted crossing, every writer
     verifies a carried claim against the current organization head, as ingest does; no

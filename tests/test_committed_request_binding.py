@@ -429,7 +429,7 @@ class SourceLedgerTests(LedgerCase):
         before = self.ledger_files()
         for case, root in cases.items():
             with self.subTest(case=case), mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT": root}):
-                self.assert_refused_json(self.cli(self.on_ledger), "SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER")
+                self.assert_refused_json(self.cli(self.on_ledger), "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED")
         self.assertEqual(self.ledger_files(), before)
 
     def test_row_8_a_ledger_holding_another_repositorys_receipts_is_refused(self):
@@ -522,15 +522,112 @@ class GitSourceLedgerTests(LedgerCase):
             with self.subTest(case=case), mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT": locator}):
                 path = work / "source.json"
                 path.write_text(json.dumps(receipt))
-                self.assert_refused_json(self.aggregate_cli(path), "SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER")
+                self.assert_refused_json(self.aggregate_cli(path), "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED")
                 self.assertEqual(self.tip(), tip)
-        # A symlink to the organization ledger's own git dir is the same repository by realpath.
+        # The emitter's store counts where it resolves to the designated ledger: a symlink to the
+        # organization ledger's own git dir is the same repository by realpath.
         with mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT":
                                           "git+" + str(work / "real-link.git") + "#" + LEDGER_REF + ":" + NAMESPACE}):
             path = work / "source.json"
             path.write_text(json.dumps(genuine))
             consumed = self.aggregate_cli(path)
         self.assertEqual(consumed.returncode, 0, consumed.stdout + consumed.stderr)
+
+    def test_row_8_the_designated_ledger_is_derived_from_the_contract_not_the_caller(self):
+        """Lead 20:57Z: with no STEGVERSE_REPO_LEDGER_ROOT at all, the designated ledger is still the
+        one verified against; an attacker receipt is refused and the genuine one consumed."""
+        genuine_result, _ = self.self_close()
+        genuine = self.receipt(os.environ["STEGVERSE_REPO_LEDGER_ROOT"], genuine_result["repository_receipt_sha256"])
+        body = {key: value for key, value in genuine.items() if key != "receipt_sha256"}
+        body["transition_id"] = "probe-unbound"
+        unbound = {**body, "receipt_sha256": binding.K.sha(body)}
+        environment = {key: value for key, value in os.environ.items() if key != "STEGVERSE_REPO_LEDGER_ROOT"}
+        work = Path(self._work.name)
+        runs = {}
+        for name, receipt in (("unbound", unbound), ("genuine", genuine)):
+            path = work / (name + ".json")
+            path.write_text(json.dumps(receipt))
+            with mock.patch.dict(os.environ, environment, clear=True):
+                runs[name] = self.aggregate_cli(path)
+        self.assert_refused_json(runs["unbound"], "SOURCE_RECEIPT_NOT_ON_LEDGER")
+        self.assertEqual(runs["genuine"].returncode, 0, runs["genuine"].stdout + runs["genuine"].stderr)
+
+
+class TrackedLedgerRootTests(unittest.TestCase):
+    """Lead 20:59Z repair (a), V-P11 row 8 on POSIX: a filesystem ledger root that holds git-tracked
+    files of this checkout is LEDGER_ROOT_NOT_CONTRACT_DESIGNATED, six fields, nothing aggregated; an
+    untracked runner-temporary or test root stays allowed."""
+
+    def test_a_ledger_committed_in_the_checkout_is_refused_and_an_untracked_one_allowed(self):
+        work = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, work, True)
+        checkout = work / "checkout"
+        shutil.copytree(ROOT, checkout, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        git = ["git", "-C", str(checkout), "-c", "user.name=probe", "-c", "user.email=probe@invalid"]
+        subprocess.run(git + ["init", "-q"], check=True)
+        source_root, org_root = work / "minted-repo-ledger", work / "org-ledger"
+        environment = {**os.environ, "STEGVERSE_REPO_LEDGER_ROOT": str(source_root),
+                       "STEGVERSE_ORG_LEDGER_ROOT": str(org_root)}
+        minted = subprocess.run([sys.executable, str(checkout / ".stegverse/transition-ledger/emit.py"),
+                                 "--transition-id", "probe-tracked", "--transition-class", "CLASS",
+                                 "--predecessor-state-sha256", "sha256:" + "a" * 64,
+                                 "--successor-state-sha256", "sha256:" + "b" * 64, "--hb-epoch", "4096"],
+                                env=environment, capture_output=True, text=True)
+        self.assertEqual(minted.returncode, 0, minted.stdout + minted.stderr)
+        receipt = json.loads(minted.stdout.splitlines()[-1])
+        source = work / "source.json"
+        source.write_text(json.dumps(receipt))
+        shutil.copytree(source_root, checkout / "fake-ledger")
+        shutil.copytree(source_root, checkout / "untracked-ledger")
+        subprocess.run(git + ["add", "-A", "--", ".", ":!untracked-ledger"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "probe"], check=True)
+
+        def aggregate(root):
+            return subprocess.run([sys.executable, str(checkout / "resident-runtime/aggregate_repo_transition.py"),
+                                   "--repo-receipt", str(source), "--predecessor-org-state-sha256", "GENESIS",
+                                   "--successor-org-state-sha256", "sha256:" + "f" * 64, "--hb-epoch", "4096"],
+                                  env={**environment, "STEGVERSE_REPO_LEDGER_ROOT": str(root)},
+                                  capture_output=True, text=True)
+        refused = aggregate(checkout / "fake-ledger")
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertNotIn("Traceback", refused.stderr)
+        refusal = json.loads(refused.stdout.splitlines()[-1])
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("LEDGER_ROOT_NOT_CONTRACT_DESIGNATED", True))
+        for field in SIX:
+            self.assertTrue(refusal[field], field)
+        self.assertFalse(org_root.exists())
+        allowed = aggregate(checkout / "untracked-ledger")
+        self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+
+
+class TupleEvidenceTests(LedgerCase):
+    """V-P11 @042a986 row 2: a committed_request key inside a tuple (json.dumps writes it as an array)
+    or any mapping is refused in process like one inside a list; a self-referring value ends the walk."""
+
+    def test_a_committed_request_in_a_tuple_is_refused_in_process(self):
+        emit = _module("emit_tuple_probe", ".stegverse/transition-ledger/emit.py")
+        aggregate = _module("aggregate_tuple_probe", "resident-runtime/aggregate_repo_transition.py")
+        forged = {"path": REQUEST, "sha256": OTHER, "hb_epoch_source": "COMMITTED_REQUEST"}
+        for evidence in ({"t": ({"committed_request": forged},)}, {"t": [(1, ({"committed_request": forged},))]}):
+            with self.subTest(evidence=evidence, writer="emit.append"):
+                with self.assertRaises(ValueError) as raised:
+                    emit.append("probe-tuple", "CLASS", "sha256:" + "a" * 64, "sha256:" + "b" * 64,
+                                evidence, "NONE", 4096)
+                self.assertEqual(raised.exception.refusal["failure_code"], "FORGED_COMMITTED_REQUEST_FROM_EVIDENCE_JSON")
+            with self.subTest(evidence=evidence, writer="aggregate.append"):
+                with self.assertRaises(ValueError) as raised:
+                    aggregate.append({}, "REPO_STATE_PROPAGATION", "FROM_HEAD", "sha256:" + "f" * 64,
+                                     evidence, "NONE", hb_epoch=4096)
+                self.assertEqual(raised.exception.refusal["failure_code"], "FORGED_COMMITTED_REQUEST_FROM_EVIDENCE_JSON")
+        for name in ("STEGVERSE_ORG_LEDGER_ROOT", "STEGVERSE_REPO_LEDGER_ROOT"):
+            self.assertFalse(Path(os.environ[name]).exists(), name)
+
+    def test_a_self_referring_value_ends_the_walk(self):
+        cyclic = {"a": []}
+        cyclic["a"].append(cyclic)
+        self.assertIsNone(binding.K.committed_request_path(cyclic))
+        cyclic["a"].append({"committed_request": 1})
+        self.assertEqual(binding.K.committed_request_path(cyclic), "$.a[1].committed_request")
 
 
 class GitRefBindingTests(LedgerCase):

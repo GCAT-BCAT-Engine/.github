@@ -31,11 +31,12 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ledger_store import HEAD_KEY, RECEIPT_PREFIX, SOURCE_PREFIX, LedgerWriteFailed, open_store, parse_locator, receipt_key, source_key  # noqa: E402
+from ledger_store import GIT_SCHEME, HEAD_KEY, RECEIPT_PREFIX, SOURCE_PREFIX, LedgerWriteFailed, open_store, parse_locator, receipt_key, source_key  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 C = json.loads((ROOT / ".stegverse/transition-ledger/org-contract.json").read_text())
@@ -249,6 +250,8 @@ def verify_required_evidence(receipt):
 COMMITTED_REQUEST_DIGEST_UNVERIFIED = "COMMITTED_REQUEST_DIGEST_UNVERIFIED"
 SOURCE_RECEIPT_NOT_ON_LEDGER = "SOURCE_RECEIPT_NOT_ON_LEDGER"
 SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER = "SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER"
+CALLER_CHOSEN_SOURCE_LEDGER_REJECTED = "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED"
+LEDGER_ROOT_NOT_CONTRACT_DESIGNATED = "LEDGER_ROOT_NOT_CONTRACT_DESIGNATED"
 SOURCE_LEDGER_CORRUPT = "SOURCE_LEDGER_CORRUPT"
 SOURCE_LEDGER_READ_FAILED = "SOURCE_LEDGER_READ_FAILED"
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -292,51 +295,71 @@ def _real(path):
     return os.path.realpath(os.fspath(path))
 
 
-def source_ledger(target):
-    """This repository's own ledger, bound to the organization ledger `target` this append writes.
+def _holds_tracked_files(root):
+    """True when `root` is, holds or contains part of this checkout's git-tracked tree.
 
-    There is no source-ledger argument. The location is the one this repository's emitter
-    writes (STEGVERSE_REPO_LEDGER_ROOT, emit.lr()), and it must be bound to `target`:
-    - a git organization ledger: the repository ledger is the contract's declared
-      repository_ledger_location (its namespace) on the same ref of the same repository,
-      compared by realpath, so a symlink or another git dir names another ledger;
-    - a POSIX organization ledger (a runner-temporary or test root, never the published
-      ref): the repository ledger is a POSIX root that is neither the organization root
-      nor inside it, nor contains it.
-    Anything else is SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER, six fields, nothing aggregated.
-    """
-    def refuse(detail):
-        raise SourceReceiptUnverified(detail, "THE_SOURCE_LEDGER_IS_THIS_REPOSITORYS_OWN_LEDGER",
-                                      SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER)
-    supplied = os.environ.get("STEGVERSE_REPO_LEDGER_ROOT")
-    if not supplied:
-        refuse("STEGVERSE_REPO_LEDGER_ROOT is not supplied; this repository's ledger cannot be located")
+    A root outside the checkout holds none of its files. One inside it is listed with
+    `git ls-files`; a checkout that cannot be listed is taken to hold tracked files."""
+    checkout, real = _real(ROOT), _real(root)
+    if real != checkout and not real.startswith(checkout + os.sep) and not checkout.startswith(real + os.sep):
+        return False
+    scope = os.path.relpath(real, checkout) if real.startswith(checkout + os.sep) else "."
     try:
-        location = parse_locator(supplied)
-    except ValueError as exc:
-        refuse("STEGVERSE_REPO_LEDGER_ROOT names no ledger: " + str(exc)[:200])
+        listed = subprocess.run(["git", "-C", checkout, "ls-files", "-z", "--", scope],
+                                capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return listed.returncode != 0 or bool(listed.stdout.strip(b"\0"))
+
+
+def source_ledger(target):
+    """This repository's designated ledger (contract.json repository_ledger_location), the only
+    ledger a source receipt is verified against, bound to the organization ledger `target`.
+
+    - git organization ledger: the designated ref and namespace in the organization ledger's
+      own repository, by realpath. It is derived, not read from the caller: a
+      STEGVERSE_REPO_LEDGER_ROOT (the emitter's store) counts only where it resolves to that
+      same ledger, and any other value is CALLER_CHOSEN_SOURCE_LEDGER_REJECTED.
+    - POSIX organization root (runner-temporary or test, never the published ref): the
+      contract designates no POSIX location, so the emitter's POSIX root is used; it must not
+      overlap the organization root (CALLER_CHOSEN_SOURCE_LEDGER_REJECTED), and neither root
+      may hold git-tracked files of this checkout (LEDGER_ROOT_NOT_CONTRACT_DESIGNATED).
+    No request field or argument names a source ledger. Six fields, nothing aggregated.
+    """
+    def refuse(code, detail):
+        raise SourceReceiptUnverified(detail, "THE_SOURCE_LEDGER_IS_THIS_REPOSITORYS_DESIGNATED_LEDGER", code)
     declared = _repository_contract().get("repository_ledger_location") or {}
-    git_source = hasattr(location, "ref")
+    supplied = os.environ.get("STEGVERSE_REPO_LEDGER_ROOT")
+    try:
+        location = parse_locator(supplied) if supplied else None
+    except ValueError as exc:
+        refuse(CALLER_CHOSEN_SOURCE_LEDGER_REJECTED, "STEGVERSE_REPO_LEDGER_ROOT names no ledger: " + str(exc)[:200])
     if getattr(target, "kind", None) == "GIT_REF":
-        if not git_source:
-            refuse("the organization ledger is a git ref; the repository ledger must be its declared namespace, "
-                   "not a filesystem root")
-        if _real(location.repository) != _real(target.repository):
-            refuse("the repository ledger is in " + _real(location.repository) + ", not the organization ledger's "
-                   "repository " + _real(target.repository))
-        if location.ref != target.ref:
-            refuse("the repository ledger is on " + location.ref + ", not the organization ledger's ref " + target.ref)
-        if location.namespace != declared.get("namespace"):
-            refuse("the repository ledger namespace " + str(location.namespace) + " is not this repository's "
-                   "declared " + str(declared.get("namespace")))
-    else:
-        root = getattr(target, "root", None)
-        if git_source or root is None:
-            refuse("the organization ledger is a filesystem root; the repository ledger must be one too")
-        source, organization = _real(location), _real(root)
-        if source == organization or source.startswith(organization + os.sep) \
-                or organization.startswith(source + os.sep):
-            refuse("the repository ledger root " + source + " overlaps the organization ledger root " + organization)
+        ref, namespace = declared.get("ref"), declared.get("namespace")
+        if not ref or not namespace or target.ref != ref:
+            refuse(LEDGER_ROOT_NOT_CONTRACT_DESIGNATED, "the organization ledger ref " + str(target.ref)
+                   + " is not the ref contract.json designates for this repository's ledger, " + str(ref))
+        if location is not None and (not hasattr(location, "ref") or _real(location.repository) != _real(target.repository)
+                                     or location.ref != ref or location.namespace != namespace):
+            refuse(CALLER_CHOSEN_SOURCE_LEDGER_REJECTED,
+                   "STEGVERSE_REPO_LEDGER_ROOT " + str(supplied) + " is not this repository's designated ledger "
+                   + ref + ":" + namespace + " in " + _real(target.repository))
+        return open_store(parse_locator(GIT_SCHEME + _real(target.repository) + "#" + ref + ":" + namespace))
+    root = getattr(target, "root", None)
+    if location is None:
+        refuse(LEDGER_ROOT_NOT_CONTRACT_DESIGNATED, "STEGVERSE_REPO_LEDGER_ROOT is not supplied and contract.json "
+               "designates no filesystem ledger beside a filesystem organization root")
+    if hasattr(location, "ref") or root is None:
+        refuse(CALLER_CHOSEN_SOURCE_LEDGER_REJECTED, "a filesystem organization root takes a filesystem repository "
+               "ledger, not " + str(supplied))
+    source, organization = _real(location), _real(root)
+    if source == organization or source.startswith(organization + os.sep) or organization.startswith(source + os.sep):
+        refuse(CALLER_CHOSEN_SOURCE_LEDGER_REJECTED,
+               "the repository ledger root " + source + " overlaps the organization ledger root " + organization)
+    for name, path in (("repository", source), ("organization", organization)):
+        if _holds_tracked_files(path):
+            refuse(LEDGER_ROOT_NOT_CONTRACT_DESIGNATED, "the " + name + " ledger root " + path
+                   + " holds git-tracked files of this checkout; a ledger is never a committed directory")
     return open_store(location)
 
 

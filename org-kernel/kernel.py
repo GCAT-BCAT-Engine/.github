@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64, hashlib, hmac, importlib.util, json, math, os, secrets, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 HB_ANCHOR_EPOCH=32
@@ -1095,16 +1096,24 @@ class CallerEvidenceRefused(ValueError):
         super().__init__(refusal["detail"]); self.refusal=refusal
 
 def committed_request_path(value:Any)->str|None:
-    """Where a committed_request key sits in a JSON value, at any depth, or None. Walked without recursion."""
-    pending=[("$",value)]
+    """Where a committed_request key sits in a JSON value, at any depth, or None.
+
+    Every container json.dumps writes is walked: a mapping as an object, and a list or a
+    tuple as an array. Walked without recursion, each container once (by identity), so
+    an in-process value that refers to itself ends the walk instead of looping."""
+    pending,seen=[("$",value)],set()
     while pending:
         path,node=pending.pop()
-        if isinstance(node,dict):
+        if isinstance(node,(Mapping,list,tuple)):
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+        if isinstance(node,Mapping):
             for key,child in node.items():
                 if key==COMMITTED_REQUEST_KEY:
                     return path+"."+str(key)
                 pending.append((path+"."+str(key),child))
-        elif isinstance(node,list):
+        elif isinstance(node,(list,tuple)):
             pending.extend((path+"["+str(index)+"]",child) for index,child in enumerate(node))
     return None
 

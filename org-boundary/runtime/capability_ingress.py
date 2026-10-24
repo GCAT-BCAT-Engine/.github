@@ -294,9 +294,13 @@ def receive(root: Path, service: Mapping[str, Any], packet: Mapping[str, Any], *
     # committed request; this boundary binds it to the receipts the operation
     # wrote, with a companion receipt on the committed-request-bindings chain
     # folded into their commit (committed_request_binding.py).
+    # The bindings chain is read back first: a torn one defers the frame before
+    # any receipt is written that could not then be bound.
     if committed_request is not None:
         binder = _committed_request_binding(root)
-        since_tip = binder.tip(binder.stores()[0])
+        org_store = binder.stores()[0]
+        binder.preflight(org_store)
+        since_tip = binder.tip(org_store)
     result = module.receive(submission, registry=registry, standing=packet.get("standing"),
                             packet_id=str(packet.get("packet_id") or resolved["receiving_operation_id"]),
                             mesh_root=mesh_root, hb_epoch=hb_epoch, hb_provenance=hb_provenance)
@@ -305,7 +309,7 @@ def receive(root: Path, service: Mapping[str, Any], packet: Mapping[str, Any], *
         binding = binder.bind(committed_request,
                               repository_receipt_sha256=result.get("repository_receipt_sha256"),
                               organization_receipt_sha256=result["organization_receipt_sha256"],
-                              hb_epoch=hb_epoch, since_tip=since_tip)
+                              hb_epoch=hb_epoch, since_tip=since_tip, own_writes=True)
     return {
         "capability_received": True,
         "capability_profile_id": resolved["capability_profile_id"],
