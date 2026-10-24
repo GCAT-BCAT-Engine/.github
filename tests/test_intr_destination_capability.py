@@ -2062,6 +2062,26 @@ class InTreeDispatcherTests(CopiedRepository):
         self.assertEqual(record["transport"], "REPOSITORY_LOCAL_SPOOL")
         self.assertEqual(json.loads(status.stdout)["heartbeat_reference"]["epoch"], 4096)
 
+    def test_every_receipt_the_dispatched_cycle_writes_carries_the_committed_request(self):
+        """CYCLE_RECEIPTS_LACK_COMMITTED_REQUEST_DIGEST (VALIDATOR V-P11 @75ca612; COMMITTED_REQUEST (b)):
+        the request's path and digest reach every repository and organization receipt the cycle
+        writes for a consumed frame, not only the cycle record."""
+        self.publish(ADDRESS, diagnostic("probe-committed-cycle"), "probe-committed-cycle")
+        runs = self.run_dispatcher(self.request(hb_epoch=4096))
+        for run in runs:
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        digest = "sha256:" + hashlib.sha256((self.copy / self.REQUEST).read_bytes()).hexdigest()
+        expected = {"path": self.REQUEST, "sha256": digest, "hb_epoch_source": "COMMITTED_REQUEST"}
+        record = json.loads((self.copy / "resident-runtime/federation/latest-cycle.json").read_text())
+        self.assertEqual((record["frames_consumed"], record["committed_request"]), (1, expected))
+        repository = self.receipts("STEGVERSE_REPO_LEDGER_ROOT", "stegverse.repo-transition-receipt/v1")
+        organization = self.receipts("STEGVERSE_ORG_LEDGER_ROOT", "stegverse.organization-transition-receipt/v1")
+        self.assertEqual((len(repository), len(organization)), (1, 1))
+        self.assertEqual(repository[0]["evidence"]["committed_request"], expected)
+        self.assertEqual(organization[0]["boundary_evidence"]["committed_request"], expected)
+        for receipt in repository + organization:
+            self.assertEqual(receipt["hb_reference"]["epoch"], 4096)
+
     def test_the_dispatcher_refuses_an_absent_or_invalid_request_epoch_before_any_entrypoint(self):
         cases = ((self.request(), 2, "HB_EPOCH_NOT_SUPPLIED"),
                  (self.request(hb_epoch=5), 2, "HB_EPOCH_INVALID"),

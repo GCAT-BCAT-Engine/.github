@@ -35,7 +35,7 @@ def main(argv:list[str]|None=None)->int:
         heartbeat=K.supplied_hb_reference(args.hb_epoch,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
         # The repository-local spool is the only route: no hosted gateway is
         # fetched from or awaited (B-P40).
-        results=K.consume_and_respond(ROOT,hb_epoch=heartbeat["epoch"])
+        results=K.consume_and_respond(ROOT,hb_epoch=heartbeat["epoch"],committed_request=committed_request)
         consumed=sum(1 for x in results if (x.get("result") or {}).get("status")=="CONSUMED")
         responses=sum(1 for x in results
                       if x.get("response_publication") and not x["response_publication"].get("reused"))

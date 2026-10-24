@@ -225,7 +225,8 @@ def capability_ingress(root:Path):
     return module
 
 def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None, hb_epoch:Any=None,
-             hb_provenance:dict[str,Any]|None=None)->dict[str,Any]:
+             hb_provenance:dict[str,Any]|None=None,
+             committed_request:dict[str,Any]|None=None)->dict[str,Any]:
     registry=load_registry(root)
     if packet["destination"]["org"]!=registry["organization"]: raise ValueError("wrong_destination_org")
     service=next((s for s in registry["services"] if s["service_id"]==packet["destination"]["service"]),None)
@@ -239,9 +240,13 @@ def dispatch(root:Path, packet:dict[str,Any], *, mesh_root:Path|None=None, hb_ep
     extra={}
     if role==CAPABILITY_INGRESS_ROLE:
         try:
+            # The committed request that triggered this cycle, when there is
+            # one, is recorded in every receipt the operation writes (the
+            # COMMITTED_REQUEST rule, (b)).
             application_result=capability_ingress(root).receive(
                 root,service,packet,registry=registry,mesh_root=mesh_root,hb_epoch=hb_epoch,
-                hb_provenance=hb_provenance)
+                hb_provenance=hb_provenance,
+                **({} if committed_request is None else {"committed_request":committed_request}))
         except SystemExit as refused:
             raise ValueError("capability_ingress_refused:"+str(refused)) from None
         extra["processing_selection"]=NO_PROCESSOR_SELECTED
@@ -535,7 +540,7 @@ def close_admission(root:Path, identifier:str)->None:
         write_json_atomic(admission_directory(root)/(identifier+".json"),{**record,"closed":True})
 
 def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
-                 hb_epoch:Any=None)->dict[str,Any]:
+                 hb_epoch:Any=None, committed_request:dict[str,Any]|None=None)->dict[str,Any]:
     """Consume one addressed frame at the epoch it is supplied, or refuse six-field.
 
     An explicit `hb_epoch` (the cycle's) is checked by the shared rule first;
@@ -597,7 +602,8 @@ def ingest_frame(root:Path, frame:dict[str,Any], *, mesh_root:Path|None=None,
                 "epoch":carried,"closed":False})
         provenance={**provenance,**admitted}
     try:
-        result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=epoch,hb_provenance=provenance)
+        result=dispatch(root,packet,mesh_root=mesh_root,hb_epoch=epoch,hb_provenance=provenance,
+                        committed_request=committed_request)
     except Exception as exc:
         # A writer fault leaves the crossing pending, its record open for the
         # retry; any other end closes it.
@@ -1115,7 +1121,8 @@ def dispatch_io_deferral(frame:dict[str,Any], exc:BaseException)->dict[str,Any]:
                        "consequence_committed":False}}
 
 def ingest_or_quarantine(root:Path, frame:Any, *, mesh_root:Path|None=None,
-                         hb_epoch:Any=None)->tuple[dict[str,Any]|None,dict[str,Any]]:
+                         hb_epoch:Any=None,
+                         committed_request:dict[str,Any]|None=None)->tuple[dict[str,Any]|None,dict[str,Any]]:
     """Ingest one frame of a cycle, or make it terminal: (packet or None, result).
 
     The guard is total. Any error that is the frame's own -- a six-field
@@ -1132,7 +1139,8 @@ def ingest_or_quarantine(root:Path, frame:Any, *, mesh_root:Path|None=None,
         if not isinstance(frame,dict):
             raise ValueError("carrier_frame_not_an_object")
         packet=recover_packet(frame)
-        return packet,ingest_frame(root,frame,mesh_root=mesh_root,hb_epoch=hb_epoch)
+        return packet,ingest_frame(root,frame,mesh_root=mesh_root,hb_epoch=hb_epoch,
+                                   committed_request=committed_request)
     except Exception as exc:
         # The writer's own fault is checked before the content guard.
         if is_writer_fault(exc):
@@ -1140,7 +1148,7 @@ def ingest_or_quarantine(root:Path, frame:Any, *, mesh_root:Path|None=None,
         return None,quarantine_result(frame if isinstance(frame,dict) else {},frame_failure_refusal(exc))
 
 def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[str]|None=None,
-                        hb_epoch:Any=None)->list[dict[str,Any]]:
+                        hb_epoch:Any=None, committed_request:dict[str,Any]|None=None)->list[dict[str,Any]]:
     """Consume addressed frames and publish each response.
 
     A response frame references the epoch its request was consumed at: the
@@ -1165,7 +1173,8 @@ def consume_and_respond(repo_root:Path, *, mesh_root:Path|None=None, seen:set[st
             if collision is not None:
                 packet,result=None,quarantine_result(item["frame"],collision)
             else:
-                packet,result=ingest_or_quarantine(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch)
+                packet,result=ingest_or_quarantine(repo_root,item["frame"],mesh_root=mesh_root,hb_epoch=hb_epoch,
+                                                   committed_request=committed_request)
         message_class=((packet or {}).get("payload") or {}).get("message_class")
         if result.get("status")=="DEFERRED":
             # Not the frame's fault: no marker, so it stays pending.
