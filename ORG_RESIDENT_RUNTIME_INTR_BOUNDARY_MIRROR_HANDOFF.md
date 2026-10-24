@@ -11,7 +11,7 @@ This `.github` owns organization resident-runtime activation source and the mech
 Application repositories expose endpoint/runtime profiles only. They do not create a second organization communication boundary.
 
 ## Runtime
-`org-runtime/activation.json` and `org-runtime/runtime_boundary.py` are the organization-local activation surfaces. Authentic execution remains a sovereign resident process. GitHub Actions is validation/evidence only.
+`org-runtime/activation.json` and `org-runtime/runtime_boundary.py` are the organization-local activation surfaces. Execution is a committed-transition cycle: one run per committed request (`.stegverse/resident-federation/cycle-request.json`), with no always-on receiver and no external machine awaited (B-P40). GitHub Actions is validation/evidence only.
 
 ## Communication
 All cross-organization communication crosses this boundary as Interlock/InTr. HB/HB-derived carriers provide synchronization/carrier capability but no authority.

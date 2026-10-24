@@ -2134,6 +2134,21 @@ class InTreeDispatcherTests(CopiedRepository):
                 self.assertEqual((refusal["disposition"], refusal["failure_code"]), ("FAIL_CLOSED", failure_code))
                 self.assertFalse((self.copy / "resident-runtime/federation/latest-cycle.json").exists())
 
+    def test_the_cycle_awaits_no_external_machine_and_no_always_on_receiver(self):
+        """B-P40 (R-SCOPE 19:29Z): the resident cycle runs once per committed request over the
+        repository-local spool. No hosted gateway or resident process is a transition predicate."""
+        manifest = json.loads(self.MANIFEST.read_text(encoding="utf-8"))
+        self.assertIs(manifest["federation_gateway_required_for_cross_host"], False)
+        self.assertEqual(manifest["federation_gateway_role"], "OPTIONAL_TRANSPORT_NOT_A_TRANSITION_PREDICATE")
+        self.assertEqual(manifest["federation_network_route"], "COMMITTED_TRANSITION_REPOSITORY_LOCAL_SPOOL")
+        self.assertEqual(manifest["federation_poll_mode"], "NONE_ONE_CYCLE_PER_COMMITTED_REQUEST")
+        activation = json.loads((ROOT / "org-runtime/activation.json").read_text(encoding="utf-8"))
+        self.assertEqual(activation["runtime_execution_surface"], "COMMITTED_TRANSITION_CYCLE")
+        for binding in self.bindings().values():
+            text = (ROOT / binding["dispatcher"]).read_text(encoding="utf-8")
+            self.assertNotIn("STEGVERSE_ORG_FEDERATION_GATEWAY_URL", text)
+            self.assertNotIn("http", text.lower().replace("https://github.com", ""))
+
     def test_the_cycle_refuses_a_malformed_committed_request_argument(self):
         cycle = _module("federation_cycle_committed_request", "resident-runtime/federation_cycle.py")
         with mock.patch("builtins.print") as printed:
