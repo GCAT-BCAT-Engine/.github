@@ -1,0 +1,38 @@
+{
+  "authority_effect": "NONE",
+  "boundary_evidence": {
+    "communication_id": "intr-path-v1:GCAT-BCAT-Engine->Triad-Test",
+    "destination_organization": "Triad-Test",
+    "disposition": "ALLOW",
+    "operation": "INTR_MESH_PATH_TRANSFER",
+    "path_id": "GCAT-BCAT-Engine->Triad-Test:intr-destination",
+    "profile_id": "intr-mesh-path-transfer",
+    "repository": "GCAT-BCAT-Engine/.github",
+    "transfer_commit": "e8e78fe42cc880f922d0178909a9e82db5687d4d"
+  },
+  "canonical_state_transition_receipt_sha256": null,
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "derived_from_clock": false,
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 0,
+    "progression_dependency": "OSCILLATOR_ONLY"
+  },
+  "org_transition_class": "REPO_STATE_PROPAGATION",
+  "organization": "GCAT-BCAT-Engine",
+  "predecessor_org_state_sha256": "sha256:455e756ce9b746decf452ce6ee33d4c71c7af89a7c554a60fcf6d2c5fc77c5de",
+  "previous_receipt_sha256": "sha256:12785d46f7b28cdc1d4bfe584af2f9f39beaa0279aef0849964195834d2d63b7",
+  "receipt_sha256": "sha256:a42b82bf13d20a29983b8831ca2701b25fe20e89db142b11c483faf1ad3836be",
+  "repo_receipt_sha256": "sha256:d509cb9bae52d127d6324ade08b019722edf8f94ca747b4f8d23fe4fb5102004",
+  "repo_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->Triad-Test:intr-destination@intr-path-v1:GCAT-BCAT-Engine->Triad-Test",
+  "schema": "stegverse.organization-transition-receipt/v1",
+  "source_receipt_schema": "stegverse.repo-transition-receipt/v1",
+  "source_repository": "GCAT-BCAT-Engine/.github",
+  "source_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->Triad-Test:intr-destination@intr-path-v1:GCAT-BCAT-Engine->Triad-Test",
+  "source_transition_sha256": "sha256:d509cb9bae52d127d6324ade08b019722edf8f94ca747b4f8d23fe4fb5102004",
+  "subject_or_correlation_id": null,
+  "successor_org_state_sha256": "sha256:f4a80e8221c6708763535b9bf6790e7c79c66d6003b6b3fcec3e53db1caf7f66"
+}
