@@ -1,0 +1,45 @@
+{
+  "authority_effect": "NONE",
+  "evidence": {
+    "capability": "intr-destination",
+    "communication_id": "intr-path-v1:GCAT-BCAT-Engine->AaCT-E",
+    "destination_address": "aact-e.intr-destination",
+    "destination_organization": "AaCT-E",
+    "disposition": "ALLOW",
+    "merge_transfer_organization_receipt_sha256": "sha256:1c49974e791f13f51857468b54ba50e14f4bb379988b73225cde9d571aa22598",
+    "message": {
+      "body": {
+        "path_id": "GCAT-BCAT-Engine->AaCT-E:intr-destination",
+        "schema": "stegverse.org-intr-destination-diagnostic/v1",
+        "transfer_commit": "e8e78fe42cc880f922d0178909a9e82db5687d4d"
+      },
+      "communication_id": "intr-path-v1:GCAT-BCAT-Engine->AaCT-E",
+      "message_class": "ecosystem.communication"
+    },
+    "message_sha256": "sha256:b55446b4bdfe73392f410b9ce970b11f7f0312d2452dd6bfaa9c9d88dda545e4",
+    "path_id": "GCAT-BCAT-Engine->AaCT-E:intr-destination",
+    "payload_sha256": "sha256:3bfe87c7f92129ccf1362d5dd07b8e8364618204917d368e3b974838fbf68560",
+    "repository": "GCAT-BCAT-Engine/.github",
+    "schema": "stegverse.intr-path-transfer-evidence/v1",
+    "source_organization": "GCAT-BCAT-Engine",
+    "transfer_commit": "e8e78fe42cc880f922d0178909a9e82db5687d4d"
+  },
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "derived_from_clock": false,
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 0,
+    "progression_dependency": "OSCILLATOR_ONLY"
+  },
+  "predecessor_state_sha256": "sha256:3bfe87c7f92129ccf1362d5dd07b8e8364618204917d368e3b974838fbf68560",
+  "previous_receipt_sha256": "sha256:633649b9b2d91357c09e1d3f5ac414acb56437f9598e719e8929b4c97ee02bf1",
+  "receipt_sha256": "sha256:3eac0552d66b8f4df23d1519bab6ddc8698166c64c3b12b0031b7a4640c7cfce",
+  "repository": "GCAT-BCAT-Engine/.github",
+  "schema": "stegverse.repo-transition-receipt/v1",
+  "successor_state_sha256": "sha256:63dc968e4ae2704199dc823ca5760f6bbbd6178d31f99d51b29d833fdce4f103",
+  "transition_class": "INTR_MESH_PATH_TRANSFER",
+  "transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->AaCT-E:intr-destination@intr-path-v1:GCAT-BCAT-Engine->AaCT-E"
+}
