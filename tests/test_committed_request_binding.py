@@ -369,6 +369,170 @@ class ForgedCommittedRequestTests(LedgerCase):
         self.assertEqual(consumed.returncode, 0, consumed.stdout + consumed.stderr)
 
 
+class SourceLedgerTests(LedgerCase):
+    """SOURCE_RECEIPT_NOT_ON_LEDGER in process (lead 20:45Z), and V-P11 rows 8 and 9 on a POSIX pair:
+    the source ledger is this repository's own, bound to the organization ledger the append writes,
+    and a corrupt ledger node is a six-field refusal, never a traceback."""
+
+    aggregate_cli = ForgedCommittedRequestTests.aggregate_cli
+    ledger_files = ForgedCommittedRequestTests.ledger_files
+    assert_refused_json = ForgedCommittedRequestTests.assert_refused_json
+
+    def setUp(self):
+        super().setUp()
+        self.aggregate = _module("aggregate_source_ledger_probe", "resident-runtime/aggregate_repo_transition.py")
+        result, _ = self.self_close()
+        self.repo_root = Path(os.environ["STEGVERSE_REPO_LEDGER_ROOT"])
+        self.digest = result["repository_receipt_sha256"]
+        self.on_ledger = json.loads((self.repo_root / store_module.receipt_key(self.digest)).read_text())
+        self.work = Path(self._work.name)
+
+    def in_process(self, receipt):
+        return self.aggregate.append(receipt, "REPO_STATE_PROPAGATION", "FROM_HEAD", "sha256:" + "f" * 64,
+                                     {}, "NONE", hb_epoch=4096)
+
+    def cli(self, receipt):
+        path = self.work / "source.json"
+        path.write_text(json.dumps(receipt))
+        return self.aggregate_cli(path)
+
+    def stack(self, node):
+        """Publish `node` (rehashed onto the current HEAD) as the repository ledger's new HEAD."""
+        head = json.loads((self.repo_root / "HEAD.json").read_text())
+        body = {**{key: value for key, value in node.items() if key != "receipt_sha256"},
+                "previous_receipt_sha256": head["receipt_sha256"]}
+        digest = binding.K.sha(body)
+        (self.repo_root / store_module.receipt_key(digest)).write_text(json.dumps({**body, "receipt_sha256": digest}))
+        (self.repo_root / "HEAD.json").write_text(json.dumps({**head, "receipt_sha256": digest}))
+        return digest
+
+    def test_an_in_process_append_refuses_an_off_ledger_source_and_takes_the_on_ledger_one(self):
+        body = {key: value for key, value in self.on_ledger.items() if key != "receipt_sha256"}
+        body["transition_id"] = "probe-in-process-off-ledger"
+        off_ledger = {**body, "receipt_sha256": binding.K.sha(body)}
+        before = self.ledger_files()
+        with self.assertRaises(self.aggregate.SourceReceiptUnverified) as raised:
+            self.in_process(off_ledger)
+        self.assert_refused(raised, "SOURCE_RECEIPT_NOT_ON_LEDGER")
+        self.assertEqual(self.ledger_files(), before)
+        self.assertEqual(self.in_process(dict(self.on_ledger))["repo_receipt_sha256"], self.digest)
+
+    def test_row_8_a_source_ledger_not_bound_to_the_organization_ledger_is_refused(self):
+        organization = os.environ["STEGVERSE_ORG_LEDGER_ROOT"]
+        attacker = self.work / "attacker-ledger"
+        shutil.copytree(self.repo_root, attacker)
+        (self.work / "link-to-org").symlink_to(organization)
+        cases = {"the organization ledger root itself": organization,
+                 "a root inside the organization ledger": str(Path(organization) / "receipts"),
+                 "a symlink to the organization ledger root": str(self.work / "link-to-org"),
+                 "a git ref beside a POSIX organization ledger": "git+" + str(self.work / "x.git") + "#" + LEDGER_REF}
+        before = self.ledger_files()
+        for case, root in cases.items():
+            with self.subTest(case=case), mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT": root}):
+                self.assert_refused_json(self.cli(self.on_ledger), "SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER")
+        self.assertEqual(self.ledger_files(), before)
+
+    def test_row_8_a_ledger_holding_another_repositorys_receipts_is_refused(self):
+        self.stack({**self.on_ledger, "repository": "GCAT-BCAT-Engine/another", "transition_id": "foreign"})
+        before = self.ledger_files()
+        self.assert_refused_json(self.cli(self.on_ledger), "SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER")
+        self.assertEqual(self.ledger_files(), before)
+
+    def test_row_9_a_corrupt_ledger_node_is_a_terminal_six_field_refusal_never_a_traceback(self):
+        newer = self.stack({**self.on_ledger, "transition_id": "probe-newer"})
+        node = self.repo_root / store_module.receipt_key(newer)
+        intact = node.read_bytes()
+        cases = {"a truncated receipt": intact[: len(intact) // 2], "garbage bytes": b"\xff\xfe garbage",
+                 "a JSON list": b"[1, 2]", "a receipt that is not its address": json.dumps(
+                     {**json.loads(intact), "transition_id": "edited"}).encode()}
+        before = self.ledger_files()
+        for case, data in cases.items():
+            with self.subTest(case=case):
+                node.write_bytes(data)
+                self.assert_refused_json(self.cli(self.on_ledger), "SOURCE_LEDGER_CORRUPT")
+                node.write_bytes(intact)
+        for case, data in {"a truncated HEAD": b'{"receipt_sha256": "sha', "a HEAD that is a list": b"[]"}.items():
+            head = self.repo_root / "HEAD.json"
+            kept = head.read_bytes()
+            with self.subTest(case=case):
+                head.write_bytes(data)
+                self.assert_refused_json(self.cli(self.on_ledger), "SOURCE_LEDGER_CORRUPT")
+                head.write_bytes(kept)
+        self.assertEqual(self.ledger_files(), before)
+
+    def test_row_9_a_ledger_read_fault_is_non_terminal_and_the_retry_aggregates_once(self):
+        store_type = type(self.aggregate.open_store(self.repo_root))
+        real_get = store_type.get
+
+        def get(store, key):
+            if Path(store.root).resolve() == self.repo_root.resolve() and key.startswith("receipts/"):
+                raise PermissionError("probe: repository ledger unreadable")
+            return real_get(store, key)
+        before = self.ledger_files()
+        with mock.patch.object(store_type, "get", get), \
+                self.assertRaises(self.aggregate.SourceLedgerReadFailed) as raised:
+            self.in_process(dict(self.on_ledger))
+        refusal = raised.exception.refusal
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), ("SOURCE_LEDGER_READ_FAILED", False))
+        self.assertTrue(raised.exception.writer_fault)
+        for field in SIX:
+            self.assertTrue(refusal[field], field)
+        self.assertEqual(self.ledger_files(), before)
+        self.assertEqual(self.in_process(dict(self.on_ledger))["repo_receipt_sha256"], self.digest)
+
+
+class GitSourceLedgerTests(LedgerCase):
+    """V-P11 row 8 on a git ref: the source ledger is the declared namespace on the organization
+    ledger's own ref and repository (by realpath); an attacker's git dir, another repository's
+    namespace or a symlink to another git dir is SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER."""
+
+    git = True
+    aggregate_cli = ForgedCommittedRequestTests.aggregate_cli
+    assert_refused_json = ForgedCommittedRequestTests.assert_refused_json
+
+    def tip(self):
+        return subprocess.run(["git", "--git-dir", str(self.git_dir), "rev-parse", LEDGER_REF],
+                              capture_output=True, text=True).stdout.strip()
+
+    def receipt(self, locator, digest):
+        return store_module.open_store(store_module.parse_locator(locator)).get(store_module.receipt_key(digest))
+
+    def test_row_8_an_attacker_ledger_another_namespace_or_a_symlink_is_refused(self):
+        work = Path(self._work.name)
+        attacker = work / "attacker.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(attacker)], check=True)
+        attacker_repo = "git+" + str(attacker) + "#" + LEDGER_REF + ":" + NAMESPACE
+        with mock.patch.dict(os.environ, {"STEGVERSE_ORG_LEDGER_ROOT": "git+" + str(attacker) + "#" + LEDGER_REF,
+                                          "STEGVERSE_REPO_LEDGER_ROOT": attacker_repo}):
+            minted, _ = self.self_close("probe-attacker")
+        fabricated = self.receipt(attacker_repo, minted["repository_receipt_sha256"])
+        genuine_result, _ = self.self_close()
+        genuine = self.receipt(os.environ["STEGVERSE_REPO_LEDGER_ROOT"], genuine_result["repository_receipt_sha256"])
+        (work / "link.git").symlink_to(attacker)
+        (work / "real-link.git").symlink_to(self.git_dir)
+        other_namespace = "git+" + str(self.git_dir) + "#" + LEDGER_REF + ":repository-ledger/GCAT-BCAT-Engine/another"
+        cases = {"the attacker's ledger": (attacker_repo, fabricated),
+                 "a symlink to the attacker's git dir": (
+                     "git+" + str(work / "link.git") + "#" + LEDGER_REF + ":" + NAMESPACE, fabricated),
+                 "another repository's namespace on the organization ref": (other_namespace, genuine),
+                 "another ref": ("git+" + str(self.git_dir) + "#refs/stegverse/other:" + NAMESPACE, genuine),
+                 "a filesystem root beside a git organization ledger": (str(work / "repo-ledger"), genuine)}
+        tip = self.tip()
+        for case, (locator, receipt) in cases.items():
+            with self.subTest(case=case), mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT": locator}):
+                path = work / "source.json"
+                path.write_text(json.dumps(receipt))
+                self.assert_refused_json(self.aggregate_cli(path), "SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER")
+                self.assertEqual(self.tip(), tip)
+        # A symlink to the organization ledger's own git dir is the same repository by realpath.
+        with mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT":
+                                          "git+" + str(work / "real-link.git") + "#" + LEDGER_REF + ":" + NAMESPACE}):
+            path = work / "source.json"
+            path.write_text(json.dumps(genuine))
+            consumed = self.aggregate_cli(path)
+        self.assertEqual(consumed.returncode, 0, consumed.stdout + consumed.stderr)
+
+
 class GitRefBindingTests(LedgerCase):
     git = True
 

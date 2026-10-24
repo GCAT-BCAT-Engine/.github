@@ -248,67 +248,183 @@ def verify_required_evidence(receipt):
 
 COMMITTED_REQUEST_DIGEST_UNVERIFIED = "COMMITTED_REQUEST_DIGEST_UNVERIFIED"
 SOURCE_RECEIPT_NOT_ON_LEDGER = "SOURCE_RECEIPT_NOT_ON_LEDGER"
+SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER = "SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER"
+SOURCE_LEDGER_CORRUPT = "SOURCE_LEDGER_CORRUPT"
+SOURCE_LEDGER_READ_FAILED = "SOURCE_LEDGER_READ_FAILED"
+_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class SourceReceiptUnverified(ValueError):
-    """A source receipt this run cannot verify against the repository ledger; six fields."""
+    """A source receipt this run cannot verify against the repository ledger; six fields, terminal."""
 
     def __init__(self, detail, predicate, failure_code=SOURCE_RECEIPT_NOT_ON_LEDGER):
         super().__init__(detail)
         self.refusal = {
             "disposition": "FAIL_CLOSED", "failure_code": failure_code, "terminal": True,
             "failed_predicate": predicate, "detail": detail,
-            "required_evidence_or_repair": ("supply a repository receipt exactly as the repository ledger holds it, "
-                                            "reachable from its HEAD, carrying no committed request of its own"),
+            "required_evidence_or_repair": ("supply a repository receipt exactly as this repository's own ledger "
+                                            "holds it, reachable from its HEAD, carrying no committed request"),
             "retry_entrypoint": EPOCH_RETRY_ENTRYPOINT, "owning_existing_goal": kernel.HB_EPOCH_OWNING_EXISTING_GOAL,
-            "next_attempt": "nothing was written; supply the receipt the ledger holds", "consequence_committed": False}
+            "next_attempt": "nothing was aggregated; supply the receipt the ledger holds", "consequence_committed": False}
+
+
+class SourceLedgerReadFailed(OSError):
+    """This boundary could not read the repository ledger; six fields, non-terminal: a writer
+    fault (`writer_fault`), so a frame is deferred and the same run is retried."""
+
+    writer_fault = True
+
+    def __init__(self, detail):
+        super().__init__(detail)
+        self.refusal = {
+            "disposition": "FAIL_CLOSED", "failure_code": SOURCE_LEDGER_READ_FAILED, "terminal": False,
+            "failed_predicate": "THIS_BOUNDARY_READS_THE_REPOSITORY_LEDGER", "detail": detail,
+            "required_evidence_or_repair": "the repository ledger is readable by this boundary",
+            "retry_entrypoint": EPOCH_RETRY_ENTRYPOINT, "owning_existing_goal": kernel.HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt": "run the same command again; nothing was aggregated", "consequence_committed": False}
 
 
 def _repository_contract():
     return json.loads((ROOT / ".stegverse/transition-ledger/contract.json").read_text())
 
 
-def verify_source_on_repository_ledger(receipt):
-    """SOURCE_RECEIPT_NOT_ON_LEDGER unless a caller-supplied source receipt is on this
-    repository's ledger: a repository receipt of this repository, stored at its address,
-    byte-for-byte, and reachable from that ledger's HEAD. Checked for every source, whether
-    or not it carries a committed request.
+def _real(path):
+    return os.path.realpath(os.fspath(path))
 
-    A receipt on the ledger that carries a committed request is refused too
-    (COMMITTED_REQUEST_DIGEST_UNVERIFIED): this run reads none, and a committed request is
-    bound only by the companion binding receipt (committed_request_binding.py).
-    Run before any write; nothing is written on a refusal.
+
+def source_ledger(target):
+    """This repository's own ledger, bound to the organization ledger `target` this append writes.
+
+    There is no source-ledger argument. The location is the one this repository's emitter
+    writes (STEGVERSE_REPO_LEDGER_ROOT, emit.lr()), and it must be bound to `target`:
+    - a git organization ledger: the repository ledger is the contract's declared
+      repository_ledger_location (its namespace) on the same ref of the same repository,
+      compared by realpath, so a symlink or another git dir names another ledger;
+    - a POSIX organization ledger (a runner-temporary or test root, never the published
+      ref): the repository ledger is a POSIX root that is neither the organization root
+      nor inside it, nor contains it.
+    Anything else is SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER, six fields, nothing aggregated.
     """
-    if receipt.get("schema") != "stegverse.repo-transition-receipt/v1":
-        raise SourceReceiptUnverified("schema " + str(receipt.get("schema")) + " is not a repository receipt; "
-                                      "it has no address on the repository ledger",
-                                      "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER")
-    repository = _repository_contract().get("repository")
-    if receipt.get("repository") != repository:
-        raise SourceReceiptUnverified("repository " + str(receipt.get("repository")) + " is not this ledger's "
-                                      + str(repository), "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER")
+    def refuse(detail):
+        raise SourceReceiptUnverified(detail, "THE_SOURCE_LEDGER_IS_THIS_REPOSITORYS_OWN_LEDGER",
+                                      SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER)
     supplied = os.environ.get("STEGVERSE_REPO_LEDGER_ROOT")
     if not supplied:
-        raise SourceReceiptUnverified("STEGVERSE_REPO_LEDGER_ROOT is not supplied; the source cannot be verified",
-                                      "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER")
+        refuse("STEGVERSE_REPO_LEDGER_ROOT is not supplied; this repository's ledger cannot be located")
     try:
-        store = open_store(parse_locator(supplied))
-        digest = receipt.get("receipt_sha256")
-        if not isinstance(digest, str) or not digest.startswith("sha256:") or store.get(receipt_key(digest)) != receipt:
-            raise SourceReceiptUnverified("receipt " + str(digest) + " is not stored at its address on the "
-                                          "repository ledger", "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER")
-        cursor, seen = (store.get(HEAD_KEY) or {}).get("receipt_sha256"), set()
-        while cursor is not None and cursor != digest and cursor not in seen:
-            seen.add(cursor)
-            cursor = (store.get(receipt_key(cursor)) or {}).get("previous_receipt_sha256")
-    except (*kernel.JSON_DOCUMENT_ERRORS, OSError, LedgerLocationRequired) as exc:
+        location = parse_locator(supplied)
+    except ValueError as exc:
+        refuse("STEGVERSE_REPO_LEDGER_ROOT names no ledger: " + str(exc)[:200])
+    declared = _repository_contract().get("repository_ledger_location") or {}
+    git_source = hasattr(location, "ref")
+    if getattr(target, "kind", None) == "GIT_REF":
+        if not git_source:
+            refuse("the organization ledger is a git ref; the repository ledger must be its declared namespace, "
+                   "not a filesystem root")
+        if _real(location.repository) != _real(target.repository):
+            refuse("the repository ledger is in " + _real(location.repository) + ", not the organization ledger's "
+                   "repository " + _real(target.repository))
+        if location.ref != target.ref:
+            refuse("the repository ledger is on " + location.ref + ", not the organization ledger's ref " + target.ref)
+        if location.namespace != declared.get("namespace"):
+            refuse("the repository ledger namespace " + str(location.namespace) + " is not this repository's "
+                   "declared " + str(declared.get("namespace")))
+    else:
+        root = getattr(target, "root", None)
+        if git_source or root is None:
+            refuse("the organization ledger is a filesystem root; the repository ledger must be one too")
+        source, organization = _real(location), _real(root)
+        if source == organization or source.startswith(organization + os.sep) \
+                or organization.startswith(source + os.sep):
+            refuse("the repository ledger root " + source + " overlaps the organization ledger root " + organization)
+    return open_store(location)
+
+
+def _walk_to(store, digest):
+    """True when `digest` is reachable from HEAD. Every node walked must be a receipt of this
+    repository that hashes to its own address; a corrupt node is SOURCE_LEDGER_CORRUPT."""
+    repository = _repository_contract().get("repository")
+
+    def corrupt(address, detail):
+        raise SourceReceiptUnverified("the repository ledger node " + str(address) + " is " + detail,
+                                      "THE_REPOSITORY_LEDGER_IS_READABLE_AS_RECEIPTS", SOURCE_LEDGER_CORRUPT)
+    try:
+        head = store.get(HEAD_KEY)
+    except kernel.JSON_DOCUMENT_ERRORS as exc:
+        corrupt("HEAD", "not a JSON document (" + type(exc).__name__ + ")")
+    if head is None:
+        return False
+    if not isinstance(head, dict):
+        corrupt("HEAD", "not an object")
+    cursor, seen = head.get("receipt_sha256"), set()
+    while cursor is not None:
+        if not isinstance(cursor, str) or not _DIGEST.match(cursor) or cursor in seen:
+            corrupt(cursor, "not a receipt address, or a cycle")
+        seen.add(cursor)
+        try:
+            node = store.get(receipt_key(cursor))
+        except kernel.JSON_DOCUMENT_ERRORS as exc:
+            corrupt(cursor, "not a JSON document (" + type(exc).__name__ + ")")
+        if node is None:
+            corrupt(cursor, "missing")
+        if not isinstance(node, dict) or node.get("receipt_sha256") != cursor \
+                or sha({key: value for key, value in node.items() if key != "receipt_sha256"}) != cursor:
+            corrupt(cursor, "not the receipt its address names")
+        if node.get("repository") != repository:
+            raise SourceReceiptUnverified("the repository ledger node " + cursor + " is a receipt of "
+                                          + str(node.get("repository")) + ", not of " + str(repository),
+                                          "THE_SOURCE_LEDGER_IS_THIS_REPOSITORYS_OWN_LEDGER",
+                                          SOURCE_LEDGER_NOT_THIS_REPOSITORY_LEDGER)
+        if cursor == digest:
+            return True
+        cursor = node.get("previous_receipt_sha256")
+    return False
+
+
+def verify_source_on_repository_ledger(receipt, target):
+    """SOURCE_RECEIPT_NOT_ON_LEDGER unless `receipt` is on this repository's own ledger (see
+    `source_ledger`): a repository receipt of this repository, stored at its address,
+    byte-for-byte, and reachable from that ledger's HEAD. Checked for every source and every
+    caller, CLI or in process, whether or not it carries a committed request.
+
+    A receipt on the ledger that carries a committed request is refused too
+    (COMMITTED_REQUEST_DIGEST_UNVERIFIED): no writer here records one on a receipt, and a
+    committed request is bound only by the companion binding receipt.
+    A corrupt ledger node is SOURCE_LEDGER_CORRUPT (terminal); a read fault is
+    SOURCE_LEDGER_READ_FAILED (non-terminal). Run before any write; nothing is written.
+    """
+    def refuse(detail, predicate="THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER"):
+        raise SourceReceiptUnverified(detail, predicate)
+    if not isinstance(receipt, dict) or receipt.get("schema") != "stegverse.repo-transition-receipt/v1":
+        refuse("schema " + str(receipt.get("schema") if isinstance(receipt, dict) else type(receipt).__name__)
+               + " is not a repository receipt; it has no address on the repository ledger")
+    repository = _repository_contract().get("repository")
+    if receipt.get("repository") != repository:
+        refuse("repository " + str(receipt.get("repository")) + " is not this ledger's " + str(repository))
+    digest = receipt.get("receipt_sha256")
+    if not isinstance(digest, str) or not _DIGEST.match(digest):
+        refuse("receipt_sha256 " + str(digest) + " is not a receipt address")
+    store = source_ledger(target)
+    try:
+        try:
+            stored = store.get(receipt_key(digest))
+        except kernel.JSON_DOCUMENT_ERRORS as exc:
+            raise SourceReceiptUnverified("the repository ledger node " + digest + " is not a JSON document ("
+                                          + type(exc).__name__ + ")", "THE_REPOSITORY_LEDGER_IS_READABLE_AS_RECEIPTS",
+                                          SOURCE_LEDGER_CORRUPT) from None
+        if stored != receipt:
+            refuse("receipt " + digest + " is not stored at its address on the repository ledger")
+        reachable = _walk_to(store, digest)
+    except FileNotFoundError:
+        refuse("the repository ledger does not exist, so receipt " + digest + " is not on it")
+    except (OSError, LedgerWriteFailed) as exc:
         if isinstance(exc, SourceReceiptUnverified):
             raise
-        raise SourceReceiptUnverified("the repository ledger cannot be read: " + type(exc).__name__,
-                                      "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER") from None
-    if cursor != digest:
-        raise SourceReceiptUnverified("receipt " + digest + " is not reachable from the repository ledger HEAD",
-                                      "THE_SOURCE_RECEIPT_IS_REACHABLE_FROM_THE_REPOSITORY_HEAD")
+        raise SourceLedgerReadFailed("the repository ledger could not be read: " + type(exc).__name__ + ": "
+                                     + str(exc)[:200]) from None
+    if not reachable:
+        refuse("receipt " + digest + " is not reachable from the repository ledger HEAD",
+               "THE_SOURCE_RECEIPT_IS_REACHABLE_FROM_THE_REPOSITORY_HEAD")
     path = kernel.committed_request_path(receipt)
     if path is not None:
         raise SourceReceiptUnverified("the source receipt names " + path + "; this run reads no committed request",
@@ -450,13 +566,16 @@ def append(source_receipt, org_transition_class, predecessor_state, successor_st
     kernel.refuse_caller_committed_request(boundary_evidence, argument="boundary_evidence",
                                            retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
     # Admission is decided before the append lock is taken; an inadmissible
-    # source receipt never contends for the organization ledger.
+    # source receipt never contends for the organization ledger. Every source, from
+    # every caller, must be on this repository's own ledger, bound to the organization
+    # ledger this append writes (SOURCE_RECEIPT_NOT_ON_LEDGER). Opening a store writes nothing.
+    target = store or open_store(ledger_root())
+    verify_source_on_repository_ledger(source_receipt, target)
     source = verify_source(source_receipt)
     if predecessor_state not in (FROM_HEAD, GENESIS):
         require_state_digest("predecessor_org_state_sha256", predecessor_state)
     require_state_digest("successor_org_state_sha256", successor_state)
     retained = {source_key(source["source_transition_sha256"]): source_receipt}
-    target = store or open_store(ledger_root())
     target.initialize()
     # The storage substrate owns serialization. A lost comparison writes
     # nothing, so a retry cannot strand an orphan receipt.
@@ -551,11 +670,6 @@ def main():
                      if receipt.get("schema") == "stegverse.repo-transition-receipt/v1"
                      else "ORGANIZATION_STATE_TRANSITION")
     try:
-        # The epoch is checked first, as append checks it; then every receipt supplied on
-        # the command line must be the one the repository ledger holds
-        # (SOURCE_RECEIPT_NOT_ON_LEDGER). Both run before any write.
-        require_supplied_epoch(args.hb_epoch, None)
-        verify_source_on_repository_ledger(receipt)
         result = append(receipt, args.org_transition_class or default_class,
                         args.predecessor_org_state_sha256, args.successor_org_state_sha256,
                         boundary_evidence, args.authority_effect,
@@ -563,7 +677,8 @@ def main():
     except LedgerLocationRequired as exc:
         print(json.dumps(location_refusal(exc), sort_keys=True))
         raise SystemExit(1)
-    except (OrgLedgerEpochRefused, SourceReceiptUnverified, kernel.CallerEvidenceRefused) as exc:
+    except (OrgLedgerEpochRefused, SourceReceiptUnverified, SourceLedgerReadFailed,
+            kernel.CallerEvidenceRefused) as exc:
         print(json.dumps(exc.refusal, sort_keys=True))
         raise SystemExit(1)
     except ValueError as exc:
