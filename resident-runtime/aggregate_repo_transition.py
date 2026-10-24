@@ -247,15 +247,16 @@ def verify_required_evidence(receipt):
 
 
 COMMITTED_REQUEST_DIGEST_UNVERIFIED = "COMMITTED_REQUEST_DIGEST_UNVERIFIED"
+SOURCE_RECEIPT_NOT_ON_LEDGER = "SOURCE_RECEIPT_NOT_ON_LEDGER"
 
 
 class SourceReceiptUnverified(ValueError):
     """A source receipt this run cannot verify against the repository ledger; six fields."""
 
-    def __init__(self, detail, predicate):
+    def __init__(self, detail, predicate, failure_code=SOURCE_RECEIPT_NOT_ON_LEDGER):
         super().__init__(detail)
         self.refusal = {
-            "disposition": "FAIL_CLOSED", "failure_code": COMMITTED_REQUEST_DIGEST_UNVERIFIED, "terminal": True,
+            "disposition": "FAIL_CLOSED", "failure_code": failure_code, "terminal": True,
             "failed_predicate": predicate, "detail": detail,
             "required_evidence_or_repair": ("supply a repository receipt exactly as the repository ledger holds it, "
                                             "reachable from its HEAD, carrying no committed request of its own"),
@@ -268,19 +269,20 @@ def _repository_contract():
 
 
 def verify_source_on_repository_ledger(receipt):
-    """COMMITTED_REQUEST_DIGEST_UNVERIFIED unless a caller-supplied repository receipt is on this
-    repository's ledger: stored at its address, byte-for-byte, and reachable from that ledger's HEAD.
+    """SOURCE_RECEIPT_NOT_ON_LEDGER unless a caller-supplied source receipt is on this
+    repository's ledger: a repository receipt of this repository, stored at its address,
+    byte-for-byte, and reachable from that ledger's HEAD. Checked for every source, whether
+    or not it carries a committed request.
 
-    A receipt carrying a committed request is refused too: this run reads none, and a committed
-    request is bound only by the companion binding receipt (committed_request_binding.py).
+    A receipt on the ledger that carries a committed request is refused too
+    (COMMITTED_REQUEST_DIGEST_UNVERIFIED): this run reads none, and a committed request is
+    bound only by the companion binding receipt (committed_request_binding.py).
     Run before any write; nothing is written on a refusal.
     """
     if receipt.get("schema") != "stegverse.repo-transition-receipt/v1":
-        return
-    path = kernel.committed_request_path(receipt)
-    if path is not None:
-        raise SourceReceiptUnverified("the source receipt names " + path + "; this run reads no committed request",
-                                      "A_SOURCE_RECEIPT_CARRIES_THE_RUNS_OWN_COMMITTED_REQUEST")
+        raise SourceReceiptUnverified("schema " + str(receipt.get("schema")) + " is not a repository receipt; "
+                                      "it has no address on the repository ledger",
+                                      "THE_SOURCE_RECEIPT_IS_ON_THIS_REPOSITORY_LEDGER")
     repository = _repository_contract().get("repository")
     if receipt.get("repository") != repository:
         raise SourceReceiptUnverified("repository " + str(receipt.get("repository")) + " is not this ledger's "
@@ -307,6 +309,11 @@ def verify_source_on_repository_ledger(receipt):
     if cursor != digest:
         raise SourceReceiptUnverified("receipt " + digest + " is not reachable from the repository ledger HEAD",
                                       "THE_SOURCE_RECEIPT_IS_REACHABLE_FROM_THE_REPOSITORY_HEAD")
+    path = kernel.committed_request_path(receipt)
+    if path is not None:
+        raise SourceReceiptUnverified("the source receipt names " + path + "; this run reads no committed request",
+                                      "A_SOURCE_RECEIPT_CARRIES_THE_RUNS_OWN_COMMITTED_REQUEST",
+                                      COMMITTED_REQUEST_DIGEST_UNVERIFIED)
 
 
 def verify_source(receipt):
@@ -544,8 +551,10 @@ def main():
                      if receipt.get("schema") == "stegverse.repo-transition-receipt/v1"
                      else "ORGANIZATION_STATE_TRANSITION")
     try:
-        # A receipt supplied on the command line must be the one the repository
-        # ledger holds (COMMITTED_REQUEST_DIGEST_UNVERIFIED), checked before any write.
+        # The epoch is checked first, as append checks it; then every receipt supplied on
+        # the command line must be the one the repository ledger holds
+        # (SOURCE_RECEIPT_NOT_ON_LEDGER). Both run before any write.
+        require_supplied_epoch(args.hb_epoch, None)
         verify_source_on_repository_ledger(receipt)
         result = append(receipt, args.org_transition_class or default_class,
                         args.predecessor_org_state_sha256, args.successor_org_state_sha256,

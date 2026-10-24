@@ -2970,7 +2970,7 @@ class WriterTraceTests(CopiedRepository):
         for root in self.state_roots():
             shutil.rmtree(root, ignore_errors=True)
         # A source repository receipt the aggregate is handed must be on the run's
-        # own repository ledger (COMMITTED_REQUEST_DIGEST_UNVERIFIED): the ledger it
+        # own repository ledger (SOURCE_RECEIPT_NOT_ON_LEDGER): the ledger it
         # was minted on is restored as the run's repository ledger.
         if self.repo_seed is not None and self.repo_seed.exists():
             shutil.copytree(self.repo_seed, os.environ["STEGVERSE_REPO_LEDGER_ROOT"])

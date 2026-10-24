@@ -346,14 +346,21 @@ class ForgedCommittedRequestTests(LedgerCase):
         forged_off_ledger = rehashed({**on_ledger, "transition_id": "probe-forged-off-ledger",
                                       "evidence": {**on_ledger["evidence"], "committed_request": self.FORGED}})
         tampered = rehashed({**on_ledger, "evidence": {**on_ledger["evidence"], "communication_id": "tampered"}})
-        cases = {"a rehashed receipt never on the ledger, with a forged digest": forged_off_ledger,
-                 "an on-ledger receipt tampered and rehashed": tampered}
+        # OFF_LEDGER_SOURCE_RECEIPT_WITHOUT_BINDING_ACCEPTED: the ledger check is unconditional, so a
+        # self-consistent receipt that names no committed request and was never appended is refused too.
+        unbound_off_ledger = rehashed({**on_ledger, "transition_id": "probe-unbound-off-ledger"})
+        self.assertIsNone(binding.K.committed_request_path(unbound_off_ledger))
+        not_a_repository_receipt = {**unbound_off_ledger, "schema": "stegverse.canonical-state-transition-receipt/v1"}
+        cases = {"a rehashed receipt never on the ledger, with a forged committed request": forged_off_ledger,
+                 "a rehashed receipt never on the ledger, with no committed request": unbound_off_ledger,
+                 "an on-ledger receipt tampered and rehashed": tampered,
+                 "a receipt that is not a repository receipt": not_a_repository_receipt}
         before = self.ledger_files()
         for case, receipt in cases.items():
             with self.subTest(case=case):
                 path = work / "forged.json"
                 path.write_text(json.dumps(receipt))
-                self.assert_refused_json(self.aggregate_cli(path), "COMMITTED_REQUEST_DIGEST_UNVERIFIED")
+                self.assert_refused_json(self.aggregate_cli(path), "SOURCE_RECEIPT_NOT_ON_LEDGER")
         self.assertEqual(self.ledger_files(), before)
         # The receipt exactly as the ledger holds it, reachable from its HEAD, is consumed.
         path = work / "on-ledger.json"
