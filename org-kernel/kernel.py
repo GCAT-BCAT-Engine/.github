@@ -5,7 +5,7 @@ Organization-neutral runtime behavior extracted from StegVerse-Labs/.github.
 No GitHub, hosted scheduler, provider, or carrier sets authority. Authority and time are constraint variables; a disposition is transition evidence only.
 """
 from __future__ import annotations
-import base64, hashlib, hmac, importlib.util, json, os, secrets, tempfile
+import base64, hashlib, hmac, importlib.util, json, math, os, secrets, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -617,7 +617,7 @@ __all__=["hb_reference","derive_channel","carrier_frame","recover_packet","dispa
          "ADMISSION_SCHEMA","ADMISSION_FIELDS","ingest_or_quarantine","frame_failure_refusal",
          "recorded_response","response_collision_refusal","writer_fault_refusal","cli_refusal",
          "WRITER_IO_FAILED","WRITER_WRITE_FAILED","CLI_INPUT_INVALID","InputRefused","input_refusal",
-         "read_json_input","JSON_DOCUMENT_ERRORS","collision_refusal","LEDGER_RECEIPT_COLLISION","control_response_packet_id","request_binding",
+         "read_json_input","strict_json_loads","JSON_DOCUMENT_ERRORS","collision_refusal","LEDGER_RECEIPT_COLLISION","control_response_packet_id","request_binding",
          "RESPONSE_ID_COLLISION","ResponseIdCollision","RESPONDING_MESSAGE_CLASSES","write_json_atomic","write_once_json",
          "HB_REFERENCE_INVALID","FRAME_INTEGRITY_INVALID","FRAME_INGEST_FAILED","FRAME_DISPATCH_IO_FAILED",
          "CARRIED_PROVENANCE_UNVERIFIED",
@@ -1051,17 +1051,31 @@ def input_refusal(argument:str, detail:str, *, retry_entrypoint:str)->dict[str,A
             "next_attempt":"nothing was read past the input and nothing was written; fix the input and run again",
             "consequence_committed":False}
 
+def _refuse_non_finite_constant(name:str)->Any:
+    raise ValueError("non-finite number "+name+" is not JSON")
+
+def _finite_float(text:str)->float:
+    value=float(text)
+    if not math.isfinite(value):
+        raise ValueError("number "+text[:40]+" overflows to a non-finite float")
+    return value
+
+def strict_json_loads(text:str)->Any:
+    """json.loads that refuses NaN, Infinity, -Infinity and a float that overflows (1e999), so a
+    non-finite number never reaches a receipt; each is a ValueError, a JSON_DOCUMENT_ERRORS."""
+    return json.loads(text,parse_constant=_refuse_non_finite_constant,parse_float=_finite_float)
+
 def read_json_input(source:Any, *, argument:str, retry_entrypoint:str, inline:bool=False,
                     expect:type|None=dict)->Any:
     """Read one CLI input -- a file path, or `inline` JSON text -- before any write, or InputRefused.
 
     A missing or unreadable file, bytes that are not UTF-8, text that is not
-    JSON, and a document of the wrong top-level type are each the terminal
+    JSON, a non-finite number, and a document of the wrong top-level type are each the terminal
     CLI_INPUT_INVALID, never an OSError for the own-state fault classifier.
     """
     try:
         raw=source.encode("utf-8") if inline else Path(source).read_bytes()
-        value=json.loads(raw.decode("utf-8"))
+        value=strict_json_loads(raw.decode("utf-8"))
     except (OSError,*JSON_DOCUMENT_ERRORS) as exc:
         raise InputRefused(input_refusal(argument,type(exc).__name__+": "+str(exc),
                                          retry_entrypoint=retry_entrypoint)) from None

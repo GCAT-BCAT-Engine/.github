@@ -134,7 +134,7 @@ def require_state_digest(field, value):
 
 
 def canon(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
 
 
 class LedgerLocationRequired(ValueError):

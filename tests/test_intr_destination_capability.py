@@ -3366,7 +3366,11 @@ class InputTraceTests(WriterTraceTests):
     on any CLI argument is a TERMINAL six-field CLI_INPUT_INVALID, non-zero, with nothing written and
     no traceback. Inputs are read before any write, outside the own-state fault classifier."""
 
-    BAD_INPUTS = ("missing", "directory", "not-utf-8", "not-json", "wrong-type", "deep")
+    # NON_FINITE_NUMBER_WRITTEN_INTO_RECEIPT: the JSON parser's NaN, Infinity, -Infinity and a
+    # float that overflows to infinity are not JSON numbers and must not reach a receipt.
+    NON_FINITE = {"nan": '{"x": NaN}', "infinity": '{"x": Infinity}',
+                  "-infinity": '{"x": -Infinity}', "overflow": '{"x": 1e999}'}
+    BAD_INPUTS = ("missing", "directory", "not-utf-8", "not-json", "wrong-type", "deep", *NON_FINITE)
 
     def bad_input(self, kind):
         path = self.inputs / ("bad-" + kind)
@@ -3380,10 +3384,12 @@ class InputTraceTests(WriterTraceTests):
             path.write_text("[1, 2]", encoding="utf-8")
         elif kind == "deep":
             path.write_text(DEEP_JSON, encoding="utf-8")
+        elif kind in self.NON_FINITE:
+            path.write_text(self.NON_FINITE[kind], encoding="utf-8")
         return path
 
     def bad_inline(self, kind):
-        return {"not-json": "{not json", "wrong-type": "[1, 2]", "deep": DEEP_JSON}.get(kind)
+        return {"not-json": "{not json", "wrong-type": "[1, 2]", "deep": DEEP_JSON, **self.NON_FINITE}.get(kind)
 
     def assert_terminal_input_refusal(self, load, argv, argument):
         self.reset()
@@ -3409,7 +3415,7 @@ class InputTraceTests(WriterTraceTests):
                 self.assert_terminal_input_refusal(load, argv_for(str(self.bad_input(kind))), argument)
 
     def each_bad_inline(self, load, argv_for, argument):
-        for kind in ("not-json", "wrong-type", "deep"):
+        for kind in ("not-json", "wrong-type", "deep", *self.NON_FINITE):
             with self.subTest(argument=argument, kind=kind):
                 self.assert_terminal_input_refusal(load, argv_for(self.bad_inline(kind)), argument)
 
@@ -3460,6 +3466,20 @@ class InputTraceTests(WriterTraceTests):
         load = lambda: self.runtime().main
         self.each_bad_file(load, lambda path: ["organization_runtime.py", "ingress", "--file", path,
                                                "--hb-epoch", "4096"], "--file")
+
+    def test_every_receipt_serializer_refuses_a_non_finite_number(self):
+        """The allow_nan=False backstop: a non-finite value that reaches a writer is refused there."""
+        emit = _module("emit_canon", ".stegverse/transition-ledger/emit.py")
+        aggregate = _module("aggregate_canon", "resident-runtime/aggregate_repo_transition.py")
+        store = _module("ledger_store_canon", "resident-runtime/ledger_store.py")
+        serializers = {"kernel.canon": kernel.canon, "emit.canon": emit.canon,
+                       "aggregate.canon": aggregate.canon,
+                       "ledger_store._document_bytes": store._document_bytes}
+        for name, serialize in serializers.items():
+            for value in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(serializer=name, value=value):
+                    with self.assertRaises(ValueError):
+                        serialize({"x": value})
 
 
 class CarriedCrossingAdmissionRecordTests(CopiedRepository):

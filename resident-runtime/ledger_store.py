@@ -61,7 +61,7 @@ def source_key(digest):
 
 def _document_bytes(value):
     """One serialization for every store, so a document reads back byte-identical."""
-    return json.dumps(value, indent=2, sort_keys=True).encode() + b"\n"
+    return json.dumps(value, indent=2, sort_keys=True, allow_nan=False).encode() + b"\n"
 
 
 GIT_SCHEME = "git+"
