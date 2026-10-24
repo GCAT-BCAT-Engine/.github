@@ -124,6 +124,81 @@
         "source_path": "org-boundary/registry/services.json",
         "sha256": "sha256:8ee45f4581907f1f1305022bb6cbf74225d827c9aca01c0c5c50aa35711a7e74"
       }
+    },
+    {
+      "organization": "AaCT-E",
+      "repository": "AaCT-E/.github",
+      "source_commit": "b71fce2d6401943161257171ed0217915ca770b3",
+      "interlock": {
+        "file": "AaCT-E.interlock-intr.json",
+        "source_path": "org-runtime/interlock-intr.json",
+        "sha256": "sha256:69293ee2194f8ba0d97478948311c958fab7ab5e1c85097a3d3c1cc756883626"
+      },
+      "services": {
+        "file": "AaCT-E.services.json",
+        "source_path": "org-boundary/registry/services.json",
+        "sha256": "sha256:f367fe40e2ced9b6e46f38162a103fc47804000172df02fdf4c52e808140ad77"
+      }
+    },
+    {
+      "organization": "AdmittedCode",
+      "repository": "AdmittedCode/.github",
+      "source_commit": "a64a956baf5c78769bbb8f69b428a36e9e7d92d9",
+      "interlock": {
+        "file": "AdmittedCode.interlock-intr.json",
+        "source_path": "org-runtime/interlock-intr.json",
+        "sha256": "sha256:c97f7c6fd722ee89900bd0601264420eb33241321e7ad3b6e5c1491b67052781"
+      },
+      "services": {
+        "file": "AdmittedCode.services.json",
+        "source_path": "org-boundary/registry/services.json",
+        "sha256": "sha256:a8e8eab5e843e16847088513da9ad97543349734723f2e6aeb2ad390b5ee178f"
+      }
+    },
+    {
+      "organization": "Data-Continuation",
+      "repository": "Data-Continuation/.github",
+      "source_commit": "ae0d8a134123d28523af90e6d855e456bcc145c1",
+      "interlock": {
+        "file": "Data-Continuation.interlock-intr.json",
+        "source_path": "org-runtime/interlock-intr.json",
+        "sha256": "sha256:f47d8ae9cab44fbb2fe5701b9f03a632afc4e6a8fd871c51310f72125237f59c"
+      },
+      "services": {
+        "file": "Data-Continuation.services.json",
+        "source_path": "org-boundary/registry/services.json",
+        "sha256": "sha256:5701696ea7b53dcc5ae57f48abe48a5f484be99bcbbf372b54c239ad9516af5f"
+      }
+    },
+    {
+      "organization": "ECAT-ICAT-Formal",
+      "repository": "ECAT-ICAT-Formal/.github",
+      "source_commit": "59b800504aac160a2fe69fe4fb48b7b2b6a6d5ab",
+      "interlock": {
+        "file": "ECAT-ICAT-Formal.interlock-intr.json",
+        "source_path": "org-runtime/interlock-intr.json",
+        "sha256": "sha256:a0c668722f5dad64a035f15a173a7b0e05b47e3a57ebe65544b53a1b9270e689"
+      },
+      "services": {
+        "file": "ECAT-ICAT-Formal.services.json",
+        "source_path": "org-boundary/registry/services.json",
+        "sha256": "sha256:a7f6fa3f7be7a59118696ee04697fb3145c87caec3f42df950c72dc54741e6a9"
+      }
+    },
+    {
+      "organization": "Triad-Test",
+      "repository": "Triad-Test/.github",
+      "source_commit": "2e8a289a59c99024c01f0db0de3fd2b277d4bc2f",
+      "interlock": {
+        "file": "Triad-Test.interlock-intr.json",
+        "source_path": "org-runtime/interlock-intr.json",
+        "sha256": "sha256:5e069853de9aee9b12a02e59ee301bf9db1f50b56803e258102c4c93e0df0ead"
+      },
+      "services": {
+        "file": "Triad-Test.services.json",
+        "source_path": "org-boundary/registry/services.json",
+        "sha256": "sha256:eb554ac4d0722a53deff2d1172b4af03369af9675f438f19d20bec8b0cb184d0"
+      }
     }
   ]
 }

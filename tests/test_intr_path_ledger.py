@@ -181,7 +181,7 @@ class GitstoreBackend(unittest.TestCase):
                 results = pt.append_transfers(EXPECTED["verified_transfer_commit"])
             finally:
                 bound.close()
-            self.assertEqual(len(results), 7)
+            self.assertEqual(len(results), len(mine()))
             for result in results:
                 self.assertEqual((result["disposition"], result["failure_code"]),
                                  ("FAIL_CLOSED", "INTR_PATH_GITSTORE_WRITER_UNBOUND"), result)
@@ -199,7 +199,7 @@ class GitstoreBackend(unittest.TestCase):
                     self.assertEqual(pt.ledger.append_merge_transfer(commit)["disposition"], "ALLOW")
                 transfer = pt.ledger.verify_transfer(EXPECTED["verified_transfer_commit"])
                 results = pt.append_transfers(EXPECTED["verified_transfer_commit"])
-                self.assertEqual([r["disposition"] for r in results], ["ALLOW"] * 7, results)
+                self.assertEqual([r["disposition"] for r in results], ["ALLOW"] * len(mine()), results)
                 after = ledger.files()
                 organization, repository = pt.ledger.readers()
                 for p in mine():
@@ -301,7 +301,7 @@ class TwoLevelPreflight(unittest.TestCase):
                 self.six(merge)
                 # one transfer-level refusal when the broken location also hides the transfer from the readers,
                 # else one refusal per declared path
-                self.assertIn(len(paths), (1, 7))
+                self.assertIn(len(paths), (1, len(mine())))
                 for result in paths:
                     self.assertEqual(result["disposition"], "FAIL_CLOSED", result)
                     self.six(result)
@@ -320,7 +320,7 @@ class TwoLevelPreflight(unittest.TestCase):
         before = self.tips()
         with mock.patch.object(lg, "append", side_effect=failed):
             paths = pt.append_transfers(EXPECTED["verified_transfer_commit"])
-        self.assertEqual(len(paths), 7)
+        self.assertEqual(len(paths), len(mine()))
         for result in paths:
             self.assertEqual((result["disposition"], result["failure_code"]), ("FAIL_CLOSED", self.ROLLBACK), result)
             self.six(result)
