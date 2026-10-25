@@ -238,6 +238,32 @@ class Atomic(unittest.TestCase):
                         self.assertTrue(caught.exception.refusal[field], field)
                     self.assertUntouched(ledger, before)
 
+    def test_a_stray_organization_ref_is_named_as_the_bound_ref_predicate_with_both_tips_unchanged(self):
+        # A stray STEGVERSE_ORG_LEDGER_GIT_REF surfaces as STEGVERSE_ORG_LEDGER_GIT_REF_IS_THE_BOUND_REF, checked
+        # against the declared organization ref before either location is resolved, whether or not the root names
+        # the stray ref too; it fails closed before either half is written, so both tips are unchanged.
+        for variable_set in ("root_and_git_ref", "git_ref_only"):
+            for writer in ("ledger_gitstore", "ingress"):
+                with self.subTest(variables=variable_set, writer=writer), TempLedger() as ledger:
+                    ledger._git("update-ref", WRONG_REF, ledger.tip())
+                    os.environ["STEGVERSE_ORG_LEDGER_GIT_REF"] = WRONG_REF
+                    if variable_set == "root_and_git_ref":
+                        os.environ["STEGVERSE_ORG_LEDGER_ROOT"] = "git+" + ledger.git_dir + "#" + WRONG_REF
+                    before = self.tips(ledger)
+                    self.assertTrue(all(before), before)
+                    with self.assertRaises(ValueError) as caught:
+                        self.path_append(9) if writer == "ledger_gitstore" else self.ingress_append(9)
+                    self.assertEqual(type(caught.exception).__name__, "TwoLevelAppendRefused")
+                    refusal = caught.exception.refusal
+                    self.assertEqual(refusal["failure_code"], lg.PREFLIGHT_REFUSED)
+                    # one pinned predicate for every stray-ref case (protocol.json ledger_module.preflight_predicate)
+                    self.assertEqual(refusal["failed_predicate"], "STEGVERSE_ORG_LEDGER_GIT_REF_IS_THE_BOUND_REF")
+                    self.assertEqual(refusal["failed_predicate"], lg.BOUND_REF_PREDICATE)
+                    for field in lg.SIX_FIELDS:
+                        self.assertTrue(refusal[field], field)
+                    self.assertEqual(self.tips(ledger), before)   # bound ref tip and stray ref tip both unchanged
+                    self.assertEqual(ledger.tip(), before[0])
+
     def test_an_organization_half_in_another_git_dir_refuses_before_either_half_is_written(self):
         with TempLedger() as ledger, tempfile.TemporaryDirectory() as other:
             subprocess.run(["git", "init", "-q", "--bare", other], check=True)
