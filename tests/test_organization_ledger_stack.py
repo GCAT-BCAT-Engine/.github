@@ -49,7 +49,7 @@ GRANT_SCAN = (
     "docs/ORGANIZATION_TRANSITION_LEDGER_MIRROR_HANDOFF.md",
     "docs/TRANSITION_LEDGER_MIRROR_HANDOFF.md",
     "docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md",
-    ".github/workflows/organization-ledger-transition.yml",
+    ".github/workflows/organization-ledger-transition-validation.yml",
 )
 
 
