@@ -84,10 +84,10 @@ of that same ref. A run that leaves the roots unset does not choose a default
 durable location.
 
 `self_close` records a diagnostic this organization addresses to its own
-`gcat-bcat-engine.intr-destination`. `organization-ledger-transition.yml`,
-on a push to main that changes `.stegverse/intr-destination/self-closure-packet.json`,
-is the run that appends that pair, fast-forward pushes the ref, and reads both
-receipts back, including `communication_id`. The validation job
+`gcat-bcat-engine.intr-destination`. No workflow runs it on the published ref any
+more: that is an InTr hop inside one organization, and InTr paths exist only between
+distinct organizations (Rigel's rule, 2026-10-25), so `organization-ledger-transition.yml`
+is retired. Its historical receipts stay; the ledger is append-only. The validation job
 (`organization-ledger-transition-validation.yml`) redirects the roots. A redirected store is not the published
 ref.
 

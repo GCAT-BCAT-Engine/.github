@@ -1,8 +1,9 @@
 name: Organization Ledger Transition Validation
 
-# PR-facing (and, where it already ran there, push-to-main) checks of
-# .github/workflows/organization-ledger-transition.yml, split from that writer so every
-# job here runs on every trigger: none is conditional and none holds contents: write.
+# PR-facing and push-to-main checks of the organization ledger stack. The self-closure
+# writer these checks were split from (organization-ledger-transition.yml) is retired:
+# InTr paths exist only between distinct organizations (Rigel's rule, 2026-10-25).
+# No job here is conditional and none holds contents: write.
 on:
   pull_request:
     branches: [main]
@@ -20,11 +21,8 @@ on:
       - 'docs/ORGANIZATION_TRANSITION_LEDGER_MIRROR_HANDOFF.md'
       - 'docs/TRANSITION_LEDGER_MIRROR_HANDOFF.md'
       - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
-      - '.github/workflows/organization-ledger-transition.yml'
+      - 'tests/test_no_org_internal_intr_hop.py'
       - '.github/workflows/organization-ledger-transition-validation.yml'
-      - '.stegverse/intr-destination/self-closure-packet.json'
-      - 'resident-runtime/self_closure_packet.py'
-      - 'tests/test_self_closure_packet.py'
   push:
     branches: [main]
     paths:
@@ -41,11 +39,8 @@ on:
       - 'docs/ORGANIZATION_TRANSITION_LEDGER_MIRROR_HANDOFF.md'
       - 'docs/TRANSITION_LEDGER_MIRROR_HANDOFF.md'
       - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
-      - '.github/workflows/organization-ledger-transition.yml'
+      - 'tests/test_no_org_internal_intr_hop.py'
       - '.github/workflows/organization-ledger-transition-validation.yml'
-      - '.stegverse/intr-destination/self-closure-packet.json'
-      - 'resident-runtime/self_closure_packet.py'
-      - 'tests/test_self_closure_packet.py'
 
 permissions:
   contents: read
@@ -86,16 +81,8 @@ jobs:
           STEGVERSE_REPO_LEDGER_ROOT: ${{ runner.temp }}/repo-ledger
           STEGVERSE_ORG_LEDGER_ROOT: ${{ runner.temp }}/org-ledger
         run: |
-          python -m unittest tests.test_organization_ledger_stack tests.test_intr_destination_capability tests.test_self_closure_packet -v
+          python -m unittest tests.test_organization_ledger_stack tests.test_intr_destination_capability tests.test_no_org_internal_intr_hop -v
           python org-kernel/tests/test_kernel.py
           python org-runtime/runtime_boundary.py validate > boundary.json
           python -c 'import json; report=json.load(open("boundary.json")); assert report["valid"] is True, report'
 
-      - name: The committed self-closure packet, if any, is what the push-to-main writer accepts
-        run: |
-          set -euo pipefail
-          if [ -e .stegverse/intr-destination/self-closure-packet.json ]; then
-            python resident-runtime/self_closure_packet.py --packet .stegverse/intr-destination/self-closure-packet.json
-          else
-            echo "no committed self-closure packet at this head; the writer has nothing to record"
-          fi
