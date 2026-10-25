@@ -1,0 +1,6 @@
+{
+  "schema": "stegverse.test-suite-skip-items/v1",
+  "authority_effect": "NONE",
+  "note": "Every skip the selected-tests job can still meet in CI, classified. An item here never hides, converts or deselects a skip: test_suite_skip_receipt.py still counts it and, when the test is in a change's selected set, still fails closed with TEST_SUITE_SKIPPED_ON_HEAD. It only names who owns making the skip go away. Skips CI can satisfy from an existing StegVerse source are satisfied in the job instead.",
+  "items": []
+}
