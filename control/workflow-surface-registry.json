@@ -1,0 +1,198 @@
+{
+  "schema": "stegverse.workflow-surface-registry/v1",
+  "goal_id": "G17-WORKFLOW-SURFACE-MINIMIZATION",
+  "repository": "GCAT-BCAT-Engine/.github",
+  "policy_issue": "StegVerse-Labs/.github#167, #168; StegVerse-org/.github#166",
+  "preferred_repository_workflow_count_max": 2,
+  "exception_repository_workflow_count_max": 3,
+  "credential_authority": "the SKAP Vault inside KV is the only PII and credential store for every user, including the StegVerse ecosystem's own; no secret or token is referenced, introduced or moved by this fold",
+  "invariants": [
+    "Every workflow file is registered in surfaces[]; an unregistered or changed one fails closed (tests/test_workflow_surface_registry.py).",
+    "A new check is a group in tools/tasks/task_catalog.json, never a new workflow file.",
+    "The stable dispatcher carries no workflow_dispatch, schedule, repository_dispatch, issues or workflow_run trigger; a kept surface is pinned by sha256 and unchanged by the fold.",
+    "G17 documented exception: above 2 workflow files, every kept surface other than the dispatcher carries an exception record (lifecycle and technical-necessity justification); the count never exceeds exception_repository_workflow_count_max (3)."
+  ],
+  "unregistered_workflow_outcome": {
+    "disposition": "FAIL_CLOSED",
+    "failure_code": "UNREGISTERED_WORKFLOW_SURFACE",
+    "failed_predicate": "EVERY_WORKFLOW_FILE_IS_REGISTERED",
+    "required_evidence_or_repair": "register the file in control/workflow-surface-registry.json surfaces[] or fold it into tools/tasks/task_catalog.json",
+    "retry_entrypoint": "tests/test_workflow_surface_registry.py",
+    "owning_existing_goal": "G17-WORKFLOW-SURFACE-MINIMIZATION (StegVerse-Labs/.github#167/#168); StegVerse-org/.github#166",
+    "next_attempt": "the next pull request touching .github/workflows/"
+  },
+  "surfaces": [
+    {
+      "path": ".github/workflows/validation-dispatcher.yml",
+      "classification": "KEEP_STABLE_DISPATCHER",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "permissions": {
+        "contents": "read"
+      }
+    },
+    {
+      "path": ".github/workflows/organization-ledger-merge-transfer.yml",
+      "classification": "KEEP_EXISTING_SURFACE_UNCHANGED",
+      "triggers": [
+        "push"
+      ],
+      "permissions": {
+        "contents": "read"
+      },
+      "reason": "KEEP_EXISTING_SURFACE_UNCHANGED (documented exception, organization-ledger writer): push to main; its job holds contents: write and pushes refs/stegverse/organization-ledger. tests/test_merge_transfer_gitstore.py L35 reads this exact file, and the two workflow_run writers chain on its name \"Organization Ledger Main Merge Transfer\".",
+      "verbatim_sha256": "7fa5b1737b0b2fc8df6467987b387fc267a05a5ed27d1c4b58ae0bab94b812f4",
+      "exception": {
+        "lifecycle": "organization-ledger writer (push)",
+        "justification": "KEEP_EXISTING_SURFACE_UNCHANGED (documented exception, organization-ledger writer): push to main; its job holds contents: write and pushes refs/stegverse/organization-ledger. tests/test_merge_transfer_gitstore.py L35 reads this exact file, and the two workflow_run writers chain on its name \"Organization Ledger Main Merge Transfer\".",
+        "within_exception_ceiling": true
+      }
+    },
+    {
+      "path": ".github/workflows/intr-path-transfer.yml",
+      "classification": "KEEP_EXISTING_SURFACE_UNCHANGED",
+      "triggers": [
+        "workflow_run"
+      ],
+      "permissions": {
+        "contents": "read"
+      },
+      "reason": "KEEP_EXISTING_SURFACE_UNCHANGED (documented exception, organization-ledger writer): workflow_run on \"Organization Ledger Main Merge Transfer\"; its job holds contents: write and fast-forwards the ledger ref. resident-runtime/intr_path_transfer.py L75 names it as ENTRYPOINT.",
+      "verbatim_sha256": "86097ded2b774079928b9c2eb4a03ace825f8d5738cbce7e4d925d73ddc3cd95",
+      "exception": {
+        "lifecycle": "organization-ledger writer (workflow_run)",
+        "justification": "KEEP_EXISTING_SURFACE_UNCHANGED (documented exception, organization-ledger writer): workflow_run on \"Organization Ledger Main Merge Transfer\"; its job holds contents: write and fast-forwards the ledger ref. resident-runtime/intr_path_transfer.py L75 names it as ENTRYPOINT.",
+        "within_exception_ceiling": true
+      }
+    },
+    {
+      "path": ".github/workflows/intr-path-ingress.yml",
+      "classification": "KEEP_EXISTING_SURFACE_UNCHANGED",
+      "triggers": [
+        "workflow_run"
+      ],
+      "permissions": {
+        "contents": "read"
+      },
+      "reason": "KEEP_EXISTING_SURFACE_UNCHANGED (documented exception, organization-ledger writer): workflow_run on \"Organization Ledger Main Merge Transfer\"; its job holds contents: write and fast-forwards the ledger ref. resident-runtime/intr_path_ingress.py L83 names it as ENTRYPOINT.",
+      "verbatim_sha256": "1bb204c1d411a225879b477c5ce50fee706a070f0be566f87a604555f032cc67",
+      "exception": {
+        "lifecycle": "organization-ledger writer (workflow_run)",
+        "justification": "KEEP_EXISTING_SURFACE_UNCHANGED (documented exception, organization-ledger writer): workflow_run on \"Organization Ledger Main Merge Transfer\"; its job holds contents: write and fast-forwards the ledger ref. resident-runtime/intr_path_ingress.py L83 names it as ENTRYPOINT.",
+        "within_exception_ceiling": true
+      }
+    },
+    {
+      "path": ".github/workflows/merge-transfer-gitstore-validation.yml",
+      "classification": "KEEP_EXISTING_SURFACE_UNCHANGED",
+      "triggers": [
+        "pull_request"
+      ],
+      "permissions": {
+        "contents": "read"
+      },
+      "reason": "KEEP_EXISTING_SURFACE_UNCHANGED (contract-pinned): tests/test_merge_transfer_gitstore.py L36 reads this exact file (VALIDATION).",
+      "verbatim_sha256": "f9c28e1869655c1385f25709b3436c959375492fa009ff6bd5dd2cbeb8fa33a7",
+      "exception": {
+        "lifecycle": "contract-pinned validator",
+        "justification": "KEEP_EXISTING_SURFACE_UNCHANGED (contract-pinned): tests/test_merge_transfer_gitstore.py L36 reads this exact file (VALIDATION).",
+        "within_exception_ceiling": true
+      }
+    },
+    {
+      "path": ".github/workflows/organization-ledger-transition-validation.yml",
+      "classification": "KEEP_EXISTING_SURFACE_UNCHANGED",
+      "triggers": [
+        "pull_request",
+        "push"
+      ],
+      "permissions": {
+        "contents": "read"
+      },
+      "reason": "KEEP_EXISTING_SURFACE_UNCHANGED (contract-pinned): tests/test_organization_ledger_stack.py L52 names this exact path.",
+      "verbatim_sha256": "c2d3f188d1908d652c2f25161e215bf89f01c1b5bcb13ff5a9e7f8f32e5fd3f5",
+      "exception": {
+        "lifecycle": "contract-pinned validator",
+        "justification": "KEEP_EXISTING_SURFACE_UNCHANGED (contract-pinned): tests/test_organization_ledger_stack.py L52 names this exact path.",
+        "within_exception_ceiling": true
+      }
+    }
+  ],
+  "folded": [
+    {
+      "workflow": ".github/workflows/intr-destination-capability-validation.yml",
+      "name": "Validate InTr Destination Capability",
+      "triggers_before": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "classification": "CONSOLIDATE_INTO_STABLE_DISPATCHER",
+      "status": "DONE",
+      "catalog_groups": [
+        "intr-destination-capability-validation.validate-intr-destination"
+      ],
+      "verbatim_record": "tools/tasks/folded/intr-destination-capability-validation.yml",
+      "verbatim_sha256": "454b716043275d2d142ffa6a87faa3ffb318d6256f243060d009274ba60d5aca"
+    },
+    {
+      "workflow": ".github/workflows/intr-path-transfer-validation.yml",
+      "name": "Validate InTr Mesh Path Transfer",
+      "triggers_before": [
+        "pull_request",
+        "push"
+      ],
+      "classification": "CONSOLIDATE_INTO_STABLE_DISPATCHER",
+      "status": "DONE",
+      "catalog_groups": [
+        "intr-path-transfer-validation.unit",
+        "intr-path-transfer-validation.dry-run"
+      ],
+      "verbatim_record": "tools/tasks/folded/intr-path-transfer-validation.yml",
+      "verbatim_sha256": "b69244b450af5643e6a5f61ab20a5fe0790073d0424ffaf04d4acf82abffede4"
+    },
+    {
+      "workflow": ".github/workflows/org-boundary-execution.yml",
+      "name": "Org Boundary Execution",
+      "triggers_before": [
+        "push",
+        "workflow_dispatch"
+      ],
+      "classification": "CONSOLIDATE_INTO_STABLE_DISPATCHER",
+      "status": "DONE",
+      "catalog_groups": [
+        "org-boundary-execution.execute"
+      ],
+      "verbatim_record": "tools/tasks/folded/org-boundary-execution.yml",
+      "verbatim_sha256": "0bb494b76291800729d1ae934bfcc746d96f44ac3c4671d60055d39dcf4f5b69"
+    },
+    {
+      "workflow": ".github/workflows/org-runtime-boundary.yml",
+      "name": "Validate Organization Resident Runtime and Interlock-InTr Boundary",
+      "triggers_before": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "classification": "CONSOLIDATE_INTO_STABLE_DISPATCHER",
+      "status": "DONE",
+      "catalog_groups": [
+        "org-runtime-boundary.validate"
+      ],
+      "verbatim_record": "tools/tasks/folded/org-runtime-boundary.yml",
+      "verbatim_sha256": "0a7f6fc5f326226bd07ce855709763be2f2a1445ee1e68df0dc1e26066b137c7"
+    }
+  ],
+  "ceiling_fail_closed": {
+    "disposition": "FAIL_CLOSED",
+    "workflow_count": 6,
+    "failure_code": "G17_CONTRACT_FLOOR_ABOVE_EXCEPTION_CEILING",
+    "failed_predicate": "workflow_count <= exception_repository_workflow_count_max (3)",
+    "required_evidence_or_repair": "a contract change that re-points tests/test_merge_transfer_gitstore.py L36 and tests/test_organization_ledger_stack.py L52 at catalog groups (folding those two validators), and a documented single-writer design for the three organization-ledger writers (organization-ledger-merge-transfer, intr-path-transfer, intr-path-ingress)",
+    "retry_entrypoint": "tests/test_workflow_surface_registry.py",
+    "owning_existing_goal": "G17-WORKFLOW-SURFACE-MINIMIZATION (StegVerse-Labs/.github#167/#168); StegVerse-org/.github#166",
+    "next_attempt": "the next pull request touching .github/workflows/ or those contracts"
+  }
+}
