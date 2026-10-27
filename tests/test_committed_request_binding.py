@@ -685,6 +685,89 @@ class TupleEvidenceTests(LedgerCase):
         self.assertEqual(binding.K.committed_request_path(cyclic), "$.a[1].committed_request")
 
 
+class BinderLedgerPairTests(LedgerCase):
+    """V-P11 final @adb3c02, BINDER_MIXED_OR_TRACKED_LEDGER_PAIR_ACCEPTED: the binder compares the
+    two ledgers' kinds first (MIXED_LEDGER_KIND_PAIR), and a filesystem pair may neither overlap
+    (CALLER_CHOSEN_SOURCE_LEDGER_REJECTED) nor hold tracked files (LEDGER_ROOT_NOT_CONTRACT_DESIGNATED),
+    in bind, verify and preflight, with nothing written."""
+
+    def ledger_files(self):
+        return sorted((str(p), p.read_bytes()) for name in ("STEGVERSE_ORG_LEDGER_ROOT", "STEGVERSE_REPO_LEDGER_ROOT")
+                      for p in Path(os.environ[name]).rglob("*") if p.is_file()) if all(
+            not os.environ[name].startswith("git+") for name in ("STEGVERSE_ORG_LEDGER_ROOT", "STEGVERSE_REPO_LEDGER_ROOT")) else []
+
+    def assert_every_entrypoint_refuses(self, result, result_path, code):
+        before = self.ledger_files()
+        run = self.bind_cli(result_path)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertNotIn("Traceback", run.stderr)
+        refusal = json.loads(run.stdout.splitlines()[-1])
+        self.assertEqual((refusal["failure_code"], refusal["terminal"]), (code, True))
+        for field in SIX:
+            self.assertTrue(refusal[field], field)
+        for name, call in (("bind", lambda: self.bind(result)),
+                           ("verify", lambda: binding.verify(expected=[(REQUEST_ARG, result["organization_receipt_sha256"])])),
+                           ("preflight", lambda: binding.preflight())):
+            with self.subTest(entrypoint=name), self.assertRaises(binding.BindingRefused) as raised:
+                call()
+            self.assertEqual(raised.exception.refusal["failure_code"], code)
+        self.assertEqual(self.ledger_files(), before)
+
+    def test_a_git_repository_ledger_beside_a_filesystem_organization_ledger_is_refused(self):
+        result, result_path = self.self_close("probe-mixed")
+        git_dir = Path(self._work.name) / "repo.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(git_dir)], check=True)
+        with mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT":
+                                          "git+" + str(git_dir) + "#" + LEDGER_REF + ":" + NAMESPACE}):
+            organization = sorted(Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]).rglob("*"))
+            self.assert_every_entrypoint_refuses(result, result_path, "MIXED_LEDGER_KIND_PAIR")
+            self.assertEqual(sorted(Path(os.environ["STEGVERSE_ORG_LEDGER_ROOT"]).rglob("*")), organization)
+
+    def test_overlapping_filesystem_roots_are_refused(self):
+        result, result_path = self.self_close("probe-overlap")
+        organization = os.environ["STEGVERSE_ORG_LEDGER_ROOT"]
+        for root in (organization, str(Path(organization) / "nested")):
+            with self.subTest(root=root), mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT": root}):
+                self.assert_every_entrypoint_refuses(result, result_path, "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED")
+
+    def test_a_filesystem_ledger_root_holding_tracked_files_is_refused_and_an_untracked_one_binds(self):
+        result, _ = self.self_close("probe-tracked-pair")
+        work = Path(self._work.name)
+        checkout = work / "checkout"
+        shutil.copytree(ROOT, checkout, ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        git = ["git", "-C", str(checkout), "-c", "user.name=probe", "-c", "user.email=probe@invalid"]
+        subprocess.run(git + ["init", "-q"], check=True)
+        for name in ("STEGVERSE_ORG_LEDGER_ROOT", "STEGVERSE_REPO_LEDGER_ROOT"):
+            for kind in ("tracked", "untracked"):
+                shutil.copytree(os.environ[name], checkout / (kind + "-" + name.lower()))
+        subprocess.run(git + ["add", "-A", "--", ".", ":!untracked-*"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", "probe"], check=True)
+
+        def bind_in(kind_org, kind_repo):
+            return subprocess.run(
+                [sys.executable, str(checkout / "resident-runtime/committed_request_binding.py"), "bind",
+                 "--committed-request", REQUEST_ARG,
+                 "--ingress-result", str(work / "probe-tracked-pair.json"), "--hb-epoch", "4096"],
+                env={**os.environ,
+                     "STEGVERSE_ORG_LEDGER_ROOT": str(checkout / (kind_org + "-stegverse_org_ledger_root")),
+                     "STEGVERSE_REPO_LEDGER_ROOT": str(checkout / (kind_repo + "-stegverse_repo_ledger_root"))},
+                capture_output=True, text=True)
+        for kind_org, kind_repo in (("tracked", "untracked"), ("untracked", "tracked"), ("tracked", "tracked")):
+            with self.subTest(organization=kind_org, repository=kind_repo):
+                tracked = sorted((checkout / (kind_org + "-stegverse_org_ledger_root")).rglob("*"))
+                run = bind_in(kind_org, kind_repo)
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                refusal = json.loads(run.stdout.splitlines()[-1])
+                self.assertEqual((refusal["failure_code"], refusal["terminal"]),
+                                 ("LEDGER_ROOT_NOT_CONTRACT_DESIGNATED", True))
+                self.assertEqual(sorted((checkout / (kind_org + "-stegverse_org_ledger_root")).rglob("*")), tracked)
+        status = subprocess.run(git + ["status", "--porcelain", "--", ".", ":!untracked-*", ":!**/__pycache__/**"],
+                                capture_output=True, text=True)
+        self.assertEqual(status.stdout, "")
+        bound = bind_in("untracked", "untracked")
+        self.assertEqual(bound.returncode, 0, bound.stdout + bound.stderr)
+
+
 class GitRefBindingTests(LedgerCase):
     git = True
 
@@ -806,6 +889,23 @@ class GitRefBindingTests(LedgerCase):
             self.assertEqual(raised.exception.refusal["failure_code"], "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED")
         read = self.readback(self.git_dir, result_path)
         self.assertEqual(read.returncode, 0, read.stdout + read.stderr)
+
+
+    def test_a_filesystem_repository_ledger_beside_a_git_organization_ledger_is_refused(self):
+        """BINDER_MIXED_OR_TRACKED_LEDGER_PAIR_ACCEPTED, the other direction: MIXED_LEDGER_KIND_PAIR."""
+        result, result_path = self.self_close("probe-git-mixed")
+        before = self.tip()
+        with mock.patch.dict(os.environ, {"STEGVERSE_REPO_LEDGER_ROOT": str(Path(self._work.name) / "repo-ledger")}):
+            run = self.bind_cli(result_path)
+            self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+            self.assertEqual(json.loads(run.stdout.splitlines()[-1])["failure_code"], "MIXED_LEDGER_KIND_PAIR")
+            for name, call in (("verify", lambda: binding.verify(
+                    expected=[(REQUEST_ARG, result["organization_receipt_sha256"])])), ("preflight", binding.preflight)):
+                with self.subTest(entrypoint=name), self.assertRaises(binding.BindingRefused) as raised:
+                    call()
+                self.assertEqual(raised.exception.refusal["failure_code"], "MIXED_LEDGER_KIND_PAIR")
+        self.assertEqual(self.tip(), before)
+        self.assertFalse((Path(self._work.name) / "repo-ledger").exists())
 
 
 if __name__ == "__main__":

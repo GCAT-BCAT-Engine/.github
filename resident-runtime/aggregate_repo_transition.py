@@ -296,20 +296,8 @@ def _real(path):
 
 
 def _holds_tracked_files(root):
-    """True when `root` is, holds or contains part of this checkout's git-tracked tree.
-
-    A root outside the checkout holds none of its files. One inside it is listed with
-    `git ls-files`; a checkout that cannot be listed is taken to hold tracked files."""
-    checkout, real = _real(ROOT), _real(root)
-    if real != checkout and not real.startswith(checkout + os.sep) and not checkout.startswith(real + os.sep):
-        return False
-    scope = os.path.relpath(real, checkout) if real.startswith(checkout + os.sep) else "."
-    try:
-        listed = subprocess.run(["git", "-C", checkout, "ls-files", "-z", "--", scope],
-                                capture_output=True, timeout=60)
-    except (OSError, subprocess.SubprocessError):
-        return True
-    return listed.returncode != 0 or bool(listed.stdout.strip(b"\0"))
+    """True when `root` is, holds or contains part of this checkout's git-tracked tree."""
+    return kernel.holds_tracked_files(root, ROOT)
 
 
 def source_ledger(target):

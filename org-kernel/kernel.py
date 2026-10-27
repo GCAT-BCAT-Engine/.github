@@ -5,7 +5,7 @@ Organization-neutral runtime behavior extracted from StegVerse-Labs/.github.
 No GitHub, hosted scheduler, provider, or carrier sets authority. Authority and time are constraint variables; a disposition is transition evidence only.
 """
 from __future__ import annotations
-import base64, hashlib, hmac, importlib.util, json, math, os, secrets, tempfile
+import base64, hashlib, hmac, importlib.util, json, math, os, secrets, subprocess, tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Mapping
@@ -1094,6 +1094,21 @@ class CallerEvidenceRefused(ValueError):
     """Caller-supplied evidence that names a committed request; carries the six-field refusal."""
     def __init__(self, refusal:dict[str,Any]):
         super().__init__(refusal["detail"]); self.refusal=refusal
+
+def holds_tracked_files(root:Any, checkout:Any)->bool:
+    """True when `root` is, holds or contains part of `checkout`'s git-tracked tree.
+
+    A root outside the checkout holds none of its files. One inside it is listed with
+    `git ls-files`; a checkout that cannot be listed is taken to hold tracked files."""
+    base,real=os.path.realpath(os.fspath(checkout)),os.path.realpath(os.fspath(root))
+    if real!=base and not real.startswith(base+os.sep) and not base.startswith(real+os.sep):
+        return False
+    scope=os.path.relpath(real,base) if real.startswith(base+os.sep) else "."
+    try:
+        listed=subprocess.run(["git","-C",base,"ls-files","-z","--",scope],capture_output=True,timeout=60)
+    except (OSError,subprocess.SubprocessError):
+        return True
+    return listed.returncode!=0 or bool(listed.stdout.strip(b"\0"))
 
 def committed_request_path(value:Any)->str|None:
     """Where a committed_request key sits in a JSON value, at any depth, or None.

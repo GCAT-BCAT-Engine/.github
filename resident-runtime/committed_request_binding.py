@@ -207,17 +207,41 @@ def _organization_chain(org_store: Any) -> list[str]:
 
 CALLER_CHOSEN_SOURCE_LEDGER_REJECTED = "CALLER_CHOSEN_SOURCE_LEDGER_REJECTED"
 LEDGER_ROOT_NOT_CONTRACT_DESIGNATED = "LEDGER_ROOT_NOT_CONTRACT_DESIGNATED"
+MIXED_LEDGER_KIND_PAIR = "MIXED_LEDGER_KIND_PAIR"
 
 
 def designated_repository_store(org_store: Any, repo_store: Any = None) -> Any:
     """The repository ledger paired with `org_store` (lead 21:13Z, paired-override form).
 
-    On a git organization ledger it is contract.json's designated ref and namespace in the
-    same repository, by realpath; a caller-chosen repository store that is not that ledger is
-    CALLER_CHOSEN_SOURCE_LEDGER_REJECTED, and an organization ref other than the designated one
-    is LEDGER_ROOT_NOT_CONTRACT_DESIGNATED. A POSIX organization root (runner-temporary or
-    test) is paired with the repository root supplied beside it."""
-    if getattr(org_store, "kind", None) != "GIT_REF":
+    - Kinds first: a git ledger beside a filesystem one is MIXED_LEDGER_KIND_PAIR.
+    - git: contract.json's designated ref and namespace in the organization ledger's own
+      repository, by realpath. A caller-chosen repository store that is not that ledger is
+      CALLER_CHOSEN_SOURCE_LEDGER_REJECTED, and an organization ref other than the designated
+      one is LEDGER_ROOT_NOT_CONTRACT_DESIGNATED.
+    - filesystem (runner-temporary or test): the repository root supplied beside the
+      organization root, which must not overlap it (CALLER_CHOSEN_SOURCE_LEDGER_REJECTED); neither
+      root may hold git-tracked files of this checkout (LEDGER_ROOT_NOT_CONTRACT_DESIGNATED).
+    Six fields, terminal, nothing written."""
+    org_kind = getattr(org_store, "kind", None)
+    if repo_store is not None and getattr(repo_store, "kind", None) != org_kind:
+        raise _refuse(MIXED_LEDGER_KIND_PAIR, "THE_LEDGER_PAIR_IS_ONE_KIND",
+                      "a " + str(getattr(repo_store, "kind", None)) + " repository ledger beside a " + str(org_kind)
+                      + " organization ledger", "supply both ledgers as git refs, or both as filesystem roots")
+    if org_kind != "GIT_REF":
+        roots = [("organization", os.path.realpath(org_store.root))]
+        if repo_store is not None:
+            source, organization = os.path.realpath(repo_store.root), roots[0][1]
+            if source == organization or source.startswith(organization + os.sep) \
+                    or organization.startswith(source + os.sep):
+                raise _refuse(CALLER_CHOSEN_SOURCE_LEDGER_REJECTED, "THE_LEDGER_IS_THIS_REPOSITORYS_DESIGNATED_LEDGER",
+                              "the repository ledger root " + source + " overlaps the organization ledger root "
+                              + organization, "supply two separate ledger roots")
+            roots.append(("repository", source))
+        for name, path in roots:
+            if K.holds_tracked_files(path, ROOT):
+                raise _refuse(LEDGER_ROOT_NOT_CONTRACT_DESIGNATED, "THE_LEDGER_IS_THIS_REPOSITORYS_DESIGNATED_LEDGER",
+                              "the " + name + " ledger root " + path + " holds git-tracked files of this checkout",
+                              "a ledger is never a committed directory; use an untracked root")
         return repo_store
     declared = json.loads((ROOT / ".stegverse/transition-ledger/contract.json").read_text()).get(
         "repository_ledger_location") or {}
@@ -227,8 +251,7 @@ def designated_repository_store(org_store: Any, repo_store: Any = None) -> Any:
                       "the organization ledger ref " + str(org_store.ref) + " is not the designated " + str(ref),
                       "use the ledger ref contract.json designates")
     repository = os.path.realpath(org_store.repository)
-    if repo_store is not None and (getattr(repo_store, "kind", None) != "GIT_REF"
-                                   or os.path.realpath(repo_store.repository) != repository
+    if repo_store is not None and (os.path.realpath(repo_store.repository) != repository
                                    or repo_store.ref != ref or repo_store.namespace != namespace):
         raise _refuse(CALLER_CHOSEN_SOURCE_LEDGER_REJECTED, "THE_LEDGER_IS_THIS_REPOSITORYS_DESIGNATED_LEDGER",
                       "the repository ledger supplied is not " + ref + ":" + namespace + " in " + repository,
@@ -256,7 +279,7 @@ def preflight(org_store: Any = None) -> None:
     """Before a transition writes the receipts it will bind: this boundary's own bindings chain
     and organization HEAD read back. A torn or unreadable one is a non-terminal
     COMMITTED_REQUEST_BINDING_READ_FAILED, so nothing is written that could not then be bound."""
-    org_store = org_store if org_store is not None else stores()[0]
+    org_store = stores(org_store)[0]
     try:
         chain(org_store)
         _get(org_store, S.HEAD_KEY, "the organization HEAD")
