@@ -1,0 +1,284 @@
+{
+ "schema": "stegverse.task-catalog/v1",
+ "repository": "GCAT-BCAT-Engine/.github",
+ "goal_id": "G17-WORKFLOW-SURFACE-MINIMIZATION",
+ "authority": "Rigel 2026-10-24 retroactive G17 enforcement (StegVerse-org/.github#166); pattern StegVerse-Labs/StegDB#60 (eab2e773)",
+ "dispatcher": ".github/workflows/validation-dispatcher.yml",
+ "runner": "tools/tasks/run_catalog.py",
+ "runner_source": "StegVerse-Labs/StegDB tools/tasks/run_catalog.py @ eab2e773271f3e63466a710f1b4555f677882848 (sha256 f741f30557888fd8e4852a52adfc65736a08898d49ade7519f6bcc2672921e9b), copied unmodified",
+ "rule": "Every check a folded workflow job ran is one group here; its step bodies are the original run blocks byte for byte, pinned by sha256, except the repairs listed. A new check is a new group (or a step in one), never a new workflow file.",
+ "path_filters": "Dropped: every group runs on every pull_request and push to main (a superset of the original path-filtered runs). workflow_dispatch/schedule triggers are not carried (no manual dispatch, no cron).",
+ "repairs": [
+  "The four validators used push/pull_request triggers (org-boundary-execution push-only, some path-filtered); as catalog groups they run on every pull request and push to main (a superset). Their workflow_dispatch triggers are not carried."
+ ],
+ "folded_from_commit": "a6a5f636d1a61499f2bfbea0e1d5e206e62a6503",
+ "groups": [
+  {
+   "id": "intr-destination-capability-validation.validate-intr-destination",
+   "source": {
+    "workflow": ".github/workflows/intr-destination-capability-validation.yml",
+    "workflow_name": "Validate InTr Destination Capability",
+    "job": "validate-intr-destination",
+    "job_name": null,
+    "commit": "a6a5f63",
+    "triggers_before": [
+     "pull_request",
+     "push",
+     "workflow_dispatch"
+    ],
+    "permissions_before": {
+     "contents": "read"
+    }
+   },
+   "events": [
+    "pull_request",
+    "push"
+   ],
+   "env": {},
+   "steps": [
+    {
+     "name": "The boundary enforces the advertised address and the served set",
+     "run_file": "tools/tasks/steps/intr-destination-capability-validation.validate-intr-destination/01-the-boundary-enforces-the-advertised-address-and-the-served-.sh",
+     "run_sha256": "d37c95d9ba9ec44a52325ce87acc8da8de428127dde5f20f530e4ecb761f2b35"
+    },
+    {
+     "name": "Validate advertise, address, resolve, emit, and close",
+     "run_file": "tools/tasks/steps/intr-destination-capability-validation.validate-intr-destination/02-validate-advertise-address-resolve-emit-and-close.sh",
+     "run_sha256": "fa5d3b43d4155d01f7c9f699483ad195165460db950e22b9b4364315f4135250",
+     "env": {
+      "STEGVERSE_REPO_LEDGER_ROOT": "${{ runner.temp }}/repo-ledger",
+      "STEGVERSE_ORG_LEDGER_ROOT": "${{ runner.temp }}/org-ledger"
+     }
+    }
+   ],
+   "artifacts": [],
+   "runner": {
+    "fetch_depth": "1",
+    "persist_credentials": "false",
+    "timeout_minutes": 30
+   }
+  },
+  {
+   "id": "intr-path-transfer-validation.unit",
+   "source": {
+    "workflow": ".github/workflows/intr-path-transfer-validation.yml",
+    "workflow_name": "Validate InTr Mesh Path Transfer",
+    "job": "unit",
+    "job_name": null,
+    "commit": "a6a5f63",
+    "triggers_before": [
+     "pull_request",
+     "push"
+    ],
+    "permissions_before": {
+     "contents": "read"
+    }
+   },
+   "events": [
+    "pull_request",
+    "push"
+   ],
+   "env": {
+    "LEDGER_REF": "refs/stegverse/organization-ledger"
+   },
+   "steps": [
+    {
+     "name": "Fetch the ledger ref read-only (the fixtures pin a commit on it)",
+     "run_file": "tools/tasks/steps/intr-path-transfer-validation.unit/01-fetch-the-ledger-ref-read-only-the-fixtures-pin-a-commit-on-.sh",
+     "run_sha256": "23d3ba4d4667391d4c731e9630fbf7fda623b69e7164369665c88cf283b947cc"
+    },
+    {
+     "name": "Declared paths, append, two-half verify, refusals (temp ledgers from the pinned tip)",
+     "run_file": "tools/tasks/steps/intr-path-transfer-validation.unit/02-declared-paths-append-two-half-verify-refusals-temp-ledgers-.sh",
+     "run_sha256": "0f0b28a1e08f534b19a6e74dffe6dfe6a18fbb2b9261e5f4118802af44b7c952"
+    },
+    {
+     "name": "Destination carrier, ingress append, link and end-to-end checks (synthetic source receipts, temp ledgers)",
+     "run_file": "tools/tasks/steps/intr-path-transfer-validation.unit/03-destination-carrier-ingress-append-link-and-end-to-end-check.sh",
+     "run_sha256": "c4e0e9ab634dfdb4a905a999ff13a486474827dfe7a9b7d994dad0fc53fcef95"
+    },
+    {
+     "name": "Ledger binding per organization (protocol.json pin); git-store backend over Lane D's pinned modules",
+     "run_file": "tools/tasks/steps/intr-path-transfer-validation.unit/04-ledger-binding-per-organization-protocol-json-pin-git-store-.sh",
+     "run_sha256": "39833e2162884daf40afb453ba702ca23343dbf1af7696d2a1122c2d59623e6d"
+    },
+    {
+     "name": "Cross-organization pair check through TV/TVC (TVC#528 fixture receipts; no token; real state FAIL_CLOSED at the TVC transition)",
+     "run_file": "tools/tasks/steps/intr-path-transfer-validation.unit/05-cross-organization-pair-check-through-tv-tvc-tvc-528-fixture.sh",
+     "run_sha256": "64ffb3399d534eab0a572a9a4111695c2f751d782c06f2130cd9e86dea5f9801"
+    },
+    {
+     "name": "Public-ledger route of the cross-org read (E0, no credential); inbound rows dry-run end to end on a scratch ref",
+     "run_file": "tools/tasks/steps/intr-path-transfer-validation.unit/06-public-ledger-route-of-the-cross-org-read-e0-no-credential-i.sh",
+     "run_sha256": "92c85c3d92623e04737797a8fd395380ae4b86090fdeb3031bd1de84b5b58053"
+    }
+   ],
+   "artifacts": [],
+   "runner": {
+    "fetch_depth": "0",
+    "persist_credentials": "true",
+    "timeout_minutes": 30
+   }
+  },
+  {
+   "id": "intr-path-transfer-validation.dry-run",
+   "source": {
+    "workflow": ".github/workflows/intr-path-transfer-validation.yml",
+    "workflow_name": "Validate InTr Mesh Path Transfer",
+    "job": "dry-run",
+    "job_name": null,
+    "commit": "a6a5f63",
+    "triggers_before": [
+     "pull_request",
+     "push"
+    ],
+    "permissions_before": {
+     "contents": "read"
+    }
+   },
+   "events": [
+    "pull_request",
+    "push"
+   ],
+   "env": {
+    "LEDGER_REF": "refs/stegverse/organization-ledger"
+   },
+   "steps": [
+    {
+     "name": "Copy the published ledger into a scratch git dir",
+     "run_file": "tools/tasks/steps/intr-path-transfer-validation.dry-run/01-copy-the-published-ledger-into-a-scratch-git-dir.sh",
+     "run_sha256": "25f5aab9deebc87f00b833e8429bd2a90d9dce298602510ad5f0b15fe7dbd64b"
+    },
+    {
+     "name": "Real state, read-only: every declared path matches its ledgered state and is terminal at E0",
+     "run_file": "tools/tasks/steps/intr-path-transfer-validation.dry-run/02-real-state-read-only-every-declared-path-matches-its-ledgere.sh",
+     "run_sha256": "d981708eaff8a4ae006639b8bbdc7dd9c89f83e4d6829309cff4c26ad1daa238"
+    },
+    {
+     "name": "The writer's append on the scratch copy, linked to the last ledgered main merge",
+     "run_file": "tools/tasks/steps/intr-path-transfer-validation.dry-run/03-the-writer-s-append-on-the-scratch-copy-linked-to-the-last-l.sh",
+     "run_sha256": "aecf7b817e249bfa659ac5bcecd1f969d02f3b108ea17506549f4ce3435893ed",
+     "env": {
+      "GIT_AUTHOR_NAME": "dry-run",
+      "GIT_AUTHOR_EMAIL": "dry-run@invalid",
+      "GIT_COMMITTER_NAME": "dry-run",
+      "GIT_COMMITTER_EMAIL": "dry-run@invalid"
+     }
+    }
+   ],
+   "artifacts": [],
+   "runner": {
+    "fetch_depth": "0",
+    "persist_credentials": "true",
+    "timeout_minutes": 30
+   }
+  },
+  {
+   "id": "org-boundary-execution.execute",
+   "source": {
+    "workflow": ".github/workflows/org-boundary-execution.yml",
+    "workflow_name": "Org Boundary Execution",
+    "job": "execute",
+    "job_name": null,
+    "commit": "a6a5f63",
+    "triggers_before": [
+     "push",
+     "workflow_dispatch"
+    ],
+    "permissions_before": null
+   },
+   "events": [
+    "pull_request",
+    "push"
+   ],
+   "env": {},
+   "steps": [
+    {
+     "name": "step 1",
+     "run_file": "tools/tasks/steps/org-boundary-execution.execute/01-step-1.sh",
+     "run_sha256": "1329c4923783d430df6bff291e2157c1082d9b25cbe7fd0f2b3c4d579b50e527"
+    }
+   ],
+   "artifacts": [],
+   "runner": {
+    "fetch_depth": "1",
+    "persist_credentials": "true",
+    "timeout_minutes": 30
+   }
+  },
+  {
+   "id": "org-runtime-boundary.validate",
+   "source": {
+    "workflow": ".github/workflows/org-runtime-boundary.yml",
+    "workflow_name": "Validate Organization Resident Runtime and Interlock-InTr Boundary",
+    "job": "validate",
+    "job_name": null,
+    "commit": "a6a5f63",
+    "triggers_before": [
+     "pull_request",
+     "push",
+     "workflow_dispatch"
+    ],
+    "permissions_before": {
+     "contents": "read"
+    }
+   },
+   "events": [
+    "pull_request",
+    "push"
+   ],
+   "env": {},
+   "steps": [
+    {
+     "name": "Validate organization boundary",
+     "run_file": "tools/tasks/steps/org-runtime-boundary.validate/01-validate-organization-boundary.sh",
+     "run_sha256": "c9c2fd2dfe2c5d29536cc797227f7bbfa4e717660d99b88410cbd839f9899cfe"
+    },
+    {
+     "name": "Validate activation request generation",
+     "run_file": "tools/tasks/steps/org-runtime-boundary.validate/02-validate-activation-request-generation.sh",
+     "run_sha256": "bd504d8d215c130fb9b5f823c4851682ac89ebdfc1515de16017138e9d4603b7"
+    },
+    {
+     "name": "Validate Interlock/InTr ingress generation",
+     "run_file": "tools/tasks/steps/org-runtime-boundary.validate/03-validate-interlock-intr-ingress-generation.sh",
+     "run_sha256": "1e839eaf709caf91c71c5ffc27049b8590735ad5bf13e46492805caa709661a8"
+    },
+    {
+     "name": "Validate Interlock/InTr egress generation",
+     "run_file": "tools/tasks/steps/org-runtime-boundary.validate/04-validate-interlock-intr-egress-generation.sh",
+     "run_sha256": "153882a73b231e18f324f59519bb2e13cdda510de9a998665392fa46b829401c"
+    }
+   ],
+   "artifacts": [],
+   "runner": {
+    "fetch_depth": "1",
+    "persist_credentials": "true",
+    "timeout_minutes": 30
+   }
+  },
+  {
+   "id": "workflow-surface-registry.validate",
+   "catalog_addition": "G17 registry gate (no folded source workflow)",
+   "events": [
+    "pull_request",
+    "push"
+   ],
+   "env": {},
+   "steps": [
+    {
+     "name": "Workflow files equal the registered surfaces; catalog verifies ALLOW",
+     "run_file": "tools/tasks/steps/workflow-surface-registry.validate/01-registry.sh",
+     "run_sha256": "811824e88664923006be2eeb35632d710f5504145967f61632ad9e8fbdcb35ca"
+    }
+   ],
+   "artifacts": [],
+   "runner": {
+    "fetch_depth": "1",
+    "persist_credentials": "false",
+    "timeout_minutes": 10,
+    "python_version": "3.11"
+   }
+  }
+ ]
+}

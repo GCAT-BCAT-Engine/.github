@@ -28,8 +28,7 @@ on:
 permissions:
   contents: read
 
-# ORGANIZATION_LEDGER_LOCK: one appender at a time, shared with
-# organization-ledger-transition.yml. The fast-forward push is the
+# ORGANIZATION_LEDGER_LOCK: one appender at a time. The fast-forward push is the
 # compare-and-swap against the published ref.
 concurrency:
   group: organization-ledger

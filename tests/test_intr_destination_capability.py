@@ -2145,9 +2145,9 @@ class InTreeDispatcherTests(CopiedRepository):
             text = workflow.read_text(encoding="utf-8")
             # The 09:20Z COMMITTED_REQUEST route, the only one (B-P40): a push
             # writer triggered only by its committed request file, whose epoch
-            # comes from that file alone.
-            readers = {"'.stegverse/intr-destination/self-closure-packet.json'": "self_closure_packet.py --packet",
-                       "'.stegverse/resident-federation/cycle-request.json'": "cycle_request.py --request"}
+            # comes from that file alone. The self-closure push writer is
+            # retired on main (PR #26), so the cycle request is the only one.
+            readers = {"'.stegverse/resident-federation/cycle-request.json'": "cycle_request.py --request"}
             reader = next((read for path, read in readers.items()
                            if _workflow_triggers(text) == ["push"] and "paths:\n      - " + path + "\n" in text), None)
             for name, job in _workflow_jobs(text).items():
@@ -3970,9 +3970,10 @@ class DeepJsonFrameTests(CopiedRepository):
         self.assertEqual(consumed["packet_id"], "probe-raw-digest")
 
 class CommittedRequestPushWriterTests(RedirectedLedgers):
-    """The 09:20Z COMMITTED_REQUEST rule, (b): the push writer (organization-ledger-transition.yml
-    close, triggered by a committed self-closure packet since main's PR #18 line) records the
-    committed request's own digest in the receipts it writes; its epoch is SUPPLIED by that request."""
+    """The 09:20Z COMMITTED_REQUEST rule, (b), on main's InTr CLI and the binder: the receipts the
+    CLI writes are bound to the committed request's own digest, and their epoch is SUPPLIED. The
+    self-closure push writer that ran these steps is retired on main (PR #26); the steps remain
+    as the library the cycle path uses."""
 
     DIGEST = "sha256:" + "c" * 64
     REQUEST = ".stegverse/intr-destination/self-closure-packet.json"

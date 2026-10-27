@@ -22,8 +22,9 @@ does not claim StegOS already named it.
 
 ``self_close`` builds a diagnostic for this organization's own
 ``intr-destination`` and calls ``receive``. Both ledger levels append through
-the repository emitter and the organization aggregator. A workflow_dispatch
-run is what publishes those receipts on ``refs/stegverse/organization-ledger``.
+the repository emitter and the organization aggregator. No workflow publishes
+those receipts any more: InTr paths exist only between distinct organizations
+(Rigel's rule, 2026-10-25), so it remains only as a library the tests exercise.
 
 Authority and time are constraint variables. The address did not select a
 processor. The disposition is transition evidence only.

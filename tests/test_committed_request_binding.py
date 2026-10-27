@@ -33,12 +33,12 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 INTR = ROOT / "resident-runtime/intr_destination_ingress.py"
 # INTR_PATH_FILE_BYTE_IDENTICAL_TO_MAIN_MODULO_GRADED_EXCEPTION_FIXES (lead 20:16Z, corrected 20:18Z):
-# the InTr lane's intr_destination_ingress.py differs from main 620a5cc only by these graded
+# the InTr lane's intr_destination_ingress.py differs from main 96c02c1 only by these graded
 # exception fixes, held on this branch for Grok Lane B to port (org#207 6389029590).
-INTR_MAIN_COMMIT = "620a5ccbfc26463afe829f64dc6cf76ce85477ac"
-INTR_MAIN_SHA256 = "df72783f26f82ff9ec84f6b2d4c5a6111da24e9addbb1e19a00ea00661dade60"
+INTR_MAIN_COMMIT = "96c02c13ce8844802199db3e766c3f4a126b9a07"
+INTR_MAIN_SHA256 = "2640a67d6f42f9a667f421f245ef9ad3f51864431b455e8d070100d14fd4068a"
 INTR_EXCEPTION_COMMITS = ("3e09c4c", "442d542", "6f15f4d", "2c613bb", "2a18232", "a397e06", "1585bf2")
-INTR_EXPECTED_SHA256 = "d8c23aa501cfcb0e028c4ef91832da5e267376a9aab16d2fe454635a82ffd6bc"
+INTR_EXPECTED_SHA256 = "fcf0e40fe9dc4da0da31c83261751a77ce5bd9eb5e5e0220612b01d7506c6b0c"
 LEDGER_REF = "refs/stegverse/organization-ledger"
 NAMESPACE = "repository-ledger/GCAT-BCAT-Engine/.github"
 REQUEST = ".stegverse/intr-destination/self-closure-packet.json"
