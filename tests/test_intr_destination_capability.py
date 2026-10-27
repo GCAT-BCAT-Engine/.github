@@ -1985,7 +1985,8 @@ def _epoch_requiring_scripts():
 
 
 class InTreeDispatcherTests(CopiedRepository):
-    """MANIFEST_DISPATCHER_NOT_IN_TREE (08:32Z): the manifest's dispatcher is a workflow in this tree."""
+    """MANIFEST_DISPATCHER_NOT_IN_TREE (08:32Z): the manifest's dispatcher is in this tree, the stable
+    validator dispatcher's resident-federation-cycle.cycle catalog group (G17 fold)."""
 
     MANIFEST = ROOT / "resident-runtime/activation-manifest.json"
 
@@ -1994,52 +1995,123 @@ class InTreeDispatcherTests(CopiedRepository):
 
     REQUEST = ".stegverse/resident-federation/cycle-request.json"
 
+    CATALOG = ROOT / "tools/tasks/task_catalog.json"
+    REGISTRY_FILE = ROOT / "control/workflow-surface-registry.json"
+    GATE = "env.CYCLE_REQUEST_COMMITTED == 'true'"
+
+    def group(self, binding):
+        groups = {row["id"]: row for row in json.loads(self.CATALOG.read_text(encoding="utf-8"))["groups"]}
+        return groups[binding["dispatcher_group"]]
+
     def test_every_binding_names_an_in_tree_dispatcher_that_invokes_it_with_the_epoch(self):
-        """B-P40 (R-DISPATCH 19:25Z): the dispatcher is triggered only by a push to main of its
+        """B-P40 (R-DISPATCH 19:25Z), folded under G17 (GCAT#15 ruling, option 2): the dispatcher is
+        the stable validator dispatcher's catalog group, selected only by a push to main of the
         committed request; the epoch is read from that request alone, gated by the shared rule."""
+        registry = json.loads(self.REGISTRY_FILE.read_text(encoding="utf-8"))
+        stable = [row["path"] for row in registry["surfaces"] if row["classification"] == "KEEP_STABLE_DISPATCHER"]
         for entrypoint, binding in self.bindings().items():
-            dispatcher = ROOT / binding["dispatcher"]
-            self.assertTrue(dispatcher.is_file(), binding["dispatcher"])
-            self.assertEqual(dispatcher.parent, ROOT / ".github/workflows")
+            self.assertEqual([binding["dispatcher"]], stable)
+            text = (ROOT / binding["dispatcher"]).read_text(encoding="utf-8")
+            self.assertIn("  push:\n    branches: [main]\n", text)
+            self.assertNotIn("inputs:", text)
             self.assertEqual(binding["dispatcher_authority_effect"], "NONE")
             self.assertEqual((binding["hb_epoch"]["from"], binding["hb_epoch"]["request"]),
                              ("committed_request", self.REQUEST))
-            text = dispatcher.read_text(encoding="utf-8")
-            self.assertEqual(_workflow_triggers(text), ["push"])
-            self.assertIn("branches: [main]\n    paths:\n      - '" + self.REQUEST + "'\n", text)
-            self.assertNotIn("inputs:", text)
+            group = self.group(binding)
+            self.assertEqual(group["runner"]["fetch_depth"], "0")
+            gate, *rest = group["steps"]
+            self.assertNotIn("if", gate)
+            self.assertIn("request=" + self.REQUEST, (ROOT / gate["run_file"]).read_text(encoding="utf-8"))
+            self.assertTrue(rest)
+            for step in rest:
+                self.assertEqual(step["if"], self.GATE, step["name"])
+            job = "".join((ROOT / step["run_file"]).read_text(encoding="utf-8") for step in rest)
             invocation = "python " + entrypoint + " "
-            invoking = [job for job in _workflow_jobs(text).values() if invocation in job]
-            self.assertTrue(invoking, entrypoint + " is not invoked by " + binding["dispatcher"])
-            for job in invoking:
-                read, gate, call = (job.index("cycle_request.py --request"), job.index("writer_epoch_refusal"),
-                                    job.index(invocation))
-                self.assertLess(read, gate)
-                self.assertLess(gate, call)
-                self.assertIn(binding["hb_epoch"]["argument"] + ' "$HB_EPOCH"', job[call:].split("\n")[0])
-            cycle_call = next(line for line in text.splitlines() if "python resident-runtime/federation_cycle.py" in line)
+            self.assertIn(invocation, job, entrypoint + " is not invoked by " + binding["dispatcher_group"])
+            read, epoch_gate, call = (job.index("cycle_request.py --request"), job.index("writer_epoch_refusal"),
+                                      job.index(invocation))
+            self.assertLess(read, epoch_gate)
+            self.assertLess(epoch_gate, call)
+            self.assertIn(binding["hb_epoch"]["argument"] + ' "$HB_EPOCH"', job[call:].split("\n")[0])
+            cycle_call = next(line for line in job.splitlines() if "python resident-runtime/federation_cycle.py" in line)
             self.assertIn('--committed-request "' + self.REQUEST + '=$CYCLE_REQUEST_SHA256"', cycle_call)
 
     def run_dispatcher(self, request):
-        """Run the dispatcher job's steps in order, as the runner would after a push of `request`."""
-        dispatcher = ROOT / next(iter(self.bindings().values()))["dispatcher"]
-        job, = _workflow_jobs(dispatcher.read_text(encoding="utf-8")).values()
+        """Run the selected group's steps in order, as the runner would after a push of `request`."""
+        group = self.group(next(iter(self.bindings().values())))
         target = self.copy / self.REQUEST
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(request if isinstance(request, str) else json.dumps(request), encoding="utf-8")
         github_env = Path(self._work.name) / "github-env"
-        github_env.write_text("", encoding="utf-8")
+        github_env.write_text("CYCLE_REQUEST_COMMITTED=true\n", encoding="utf-8")
         outputs = []
-        for script in _run_blocks(job):
+        for step in group["steps"][1:]:
             exported = dict(line.split("=", 1) for line in github_env.read_text(encoding="utf-8").splitlines() if line)
             environment = {**os.environ, **exported, "GITHUB_ENV": str(github_env),
                            "STEGVERSE_ORG_FEDERATION_ROOT": str(self.mesh)}
+            script = (ROOT / step["run_file"]).read_text(encoding="utf-8")
             run = subprocess.run(["bash", "-e", "-c", script], cwd=self.copy, env=environment,
                                  capture_output=True, text=True, check=False)
             outputs.append(run)
             if run.returncode != 0:
                 break
         return outputs
+
+    def test_the_group_selects_only_a_push_to_main_that_changes_the_committed_request(self):
+        """The fold keeps resident-federation-cycle.yml's trigger: push, branches [main], paths: the
+        request. Step 1 exports CYCLE_REQUEST_COMMITTED from the push's before..after diff."""
+        gate = ROOT / self.group(next(iter(self.bindings().values())))["steps"][0]["run_file"]
+        repository = Path(self._work.name) / "selection"
+        repository.mkdir()
+        git = ["git", "-C", str(repository), "-c", "user.name=probe", "-c", "user.email=probe@invalid"]
+        subprocess.run(git + ["init", "-q"], check=True)
+
+        def commit(path, text):
+            (repository / path).parent.mkdir(parents=True, exist_ok=True)
+            (repository / path).write_text(text, encoding="utf-8")
+            subprocess.run(git + ["add", "-A"], check=True)
+            subprocess.run(git + ["commit", "-q", "-m", path], check=True)
+            return subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
+        first = commit("README", "x")
+        requested = commit(self.REQUEST, "{}")
+        unrelated = commit("README", "y")
+        zero = "0" * 40
+
+        def select(event, ref, before, after):
+            out = Path(self._work.name) / "gate-env"
+            out.write_text("", encoding="utf-8")
+            run = subprocess.run(["bash", "-e", str(gate)], cwd=repository, capture_output=True, text=True,
+                                 env={**os.environ, "GITHUB_ENV": str(out), "GITHUB_EVENT_NAME": event, "GITHUB_REF": ref,
+                                      "CATALOG_EVENT_BEFORE": before, "CATALOG_EVENT_AFTER": after})
+            return run.returncode, out.read_text(encoding="utf-8").strip()
+        main = "refs/heads/main"
+        cases = {"a push to main changing the request": (("push", main, first, requested), (0, "true")),
+                 "a push to main not changing it": (("push", main, requested, unrelated), (0, "false")),
+                 "a new branch push holding it": (("push", main, zero, requested), (0, "true")),
+                 "a new branch push without it": (("push", main, zero, first), (0, "false")),
+                 "a push to another branch": (("push", "refs/heads/other", first, requested), (0, "false")),
+                 "a pull request": (("pull_request", "refs/pull/1/merge", "", ""), (0, "false")),
+                 "a push whose before is not comparable": (("push", main, "f" * 40, requested), (1, ""))}
+        for case, (arguments, expected) in cases.items():
+            with self.subTest(case=case):
+                code, exported = select(*arguments)
+                self.assertEqual((code, exported),
+                                 (expected[0], "CYCLE_REQUEST_COMMITTED=" + expected[1] if expected[1] else ""))
+
+    def test_on_any_other_event_the_catalog_group_runs_nothing(self):
+        """Through the catalog runner itself: on a pull_request every step after the selection is
+        SKIPPED_BY_CONDITION, the group is ALLOW, and no cycle runs."""
+        temp = Path(self._work.name) / "runner-temp"
+        temp.mkdir()
+        run = subprocess.run([sys.executable, str(self.copy / "tools/tasks/run_catalog.py"), "run",
+                              "--group", "resident-federation-cycle.cycle"], cwd=self.copy, capture_output=True,
+                             text=True, env={**os.environ, "GITHUB_EVENT_NAME": "pull_request",
+                                             "GITHUB_REF": "refs/pull/1/merge", "RUNNER_TEMP": str(temp)})
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        receipt = json.loads((temp / "catalog-receipts/resident-federation-cycle.cycle.json").read_text())
+        self.assertEqual(receipt["disposition"], "ALLOW")
+        self.assertEqual([step.get("result") for step in receipt["steps"][1:]], ["SKIPPED_BY_CONDITION"] * 4)
+        self.assertFalse((self.copy / "resident-runtime/federation/latest-cycle.json").exists())
 
     def request(self, **fields):
         return {"schema": "stegverse.resident-federation-cycle-request/v1", "request_id": "probe-cycle", **fields}
@@ -2127,8 +2199,9 @@ class InTreeDispatcherTests(CopiedRepository):
         activation = json.loads((ROOT / "org-runtime/activation.json").read_text(encoding="utf-8"))
         self.assertEqual(activation["runtime_execution_surface"], "COMMITTED_TRANSITION_CYCLE")
         for binding in self.bindings().values():
-            text = (ROOT / binding["dispatcher"]).read_text(encoding="utf-8")
-            self.assertNotIn("http", text.lower().replace("https://github.com", ""))
+            for step in self.group(binding)["steps"]:
+                text = (ROOT / step["run_file"]).read_text(encoding="utf-8")
+                self.assertNotIn("http", text.lower().replace("https://github.com", ""))
 
     def test_the_cycle_refuses_a_malformed_committed_request_argument(self):
         cycle = _module("federation_cycle_committed_request", "resident-runtime/federation_cycle.py")

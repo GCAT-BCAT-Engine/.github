@@ -183,6 +183,21 @@
       ],
       "verbatim_record": "tools/tasks/folded/org-runtime-boundary.yml",
       "verbatim_sha256": "0a7f6fc5f326226bd07ce855709763be2f2a1445ee1e68df0dc1e26066b137c7"
+    },
+    {
+      "workflow": ".github/workflows/resident-federation-cycle.yml",
+      "name": "Resident Federation Cycle",
+      "triggers_before": [
+        "push"
+      ],
+      "classification": "CONSOLIDATE_INTO_STABLE_DISPATCHER",
+      "status": "DONE",
+      "catalog_groups": [
+        "resident-federation-cycle.cycle"
+      ],
+      "verbatim_record": "tools/tasks/folded/resident-federation-cycle.yml",
+      "verbatim_sha256": "1cdd5b381dccb7e01fbb75450e45199840939297e179e7c13c309bea287d9f16",
+      "ruling": "GCAT#15 coordinator ruling 2026-10-27 (option 2): folded with the same committed-request push selection, no dispatch or schedule"
     }
   ],
   "ceiling_fail_closed": {

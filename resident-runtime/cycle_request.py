@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The committed state transition that triggers resident-federation-cycle.yml.
+"""The committed state transition that selects the resident-federation-cycle.cycle catalog group.
 
 The resident cycle runs on push to main when this file changes, once per
 committed request. It reads the cycle's inputs from the pushed commit's copy
@@ -24,7 +24,8 @@ from typing import Any
 
 SCHEMA = "stegverse.resident-federation-cycle-request/v1"
 REQUEST_PATH = ".stegverse/resident-federation/cycle-request.json"
-ENTRYPOINT = ".github/workflows/resident-federation-cycle.yml (push to main touching " + REQUEST_PATH + ")"
+ENTRYPOINT = ("tools/tasks/task_catalog.json group resident-federation-cycle.cycle "
+              "(.github/workflows/validation-dispatcher.yml, push to main touching " + REQUEST_PATH + ")")
 GOAL = "INTERLOCK-INTR-RUNTIME-INDEPENDENT-PROTOCOL-001"
 FIELDS = {"schema", "request_id", "hb_epoch"}
 

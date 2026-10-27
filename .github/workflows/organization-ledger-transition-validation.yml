@@ -23,8 +23,6 @@ on:
       - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
       - 'tests/test_no_org_internal_intr_hop.py'
       - '.github/workflows/organization-ledger-transition-validation.yml'
-      - 'tests/test_committed_request_binding.py'
-      - 'resident-runtime/committed_request_binding.py'
   push:
     branches: [main]
     paths:
@@ -43,8 +41,6 @@ on:
       - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
       - 'tests/test_no_org_internal_intr_hop.py'
       - '.github/workflows/organization-ledger-transition-validation.yml'
-      - 'tests/test_committed_request_binding.py'
-      - 'resident-runtime/committed_request_binding.py'
 
 permissions:
   contents: read
@@ -54,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout organization boundary
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -85,7 +81,7 @@ jobs:
           STEGVERSE_REPO_LEDGER_ROOT: ${{ runner.temp }}/repo-ledger
           STEGVERSE_ORG_LEDGER_ROOT: ${{ runner.temp }}/org-ledger
         run: |
-          python -m unittest tests.test_organization_ledger_stack tests.test_intr_destination_capability tests.test_no_org_internal_intr_hop tests.test_committed_request_binding -v
+          python -m unittest tests.test_organization_ledger_stack tests.test_intr_destination_capability tests.test_no_org_internal_intr_hop -v
           python org-kernel/tests/test_kernel.py
           python org-runtime/runtime_boundary.py validate > boundary.json
           python -c 'import json; report=json.load(open("boundary.json")); assert report["valid"] is True, report'

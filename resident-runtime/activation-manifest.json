@@ -27,14 +27,16 @@
   "epoch_bindings": {
     "resident-runtime/federation_cycle.py": {
       "hb_epoch": {"from": "committed_request", "request": ".stegverse/resident-federation/cycle-request.json", "argument": "--hb-epoch", "environment": "HB_EPOCH"},
-      "dispatcher": ".github/workflows/resident-federation-cycle.yml",
+      "dispatcher": ".github/workflows/validation-dispatcher.yml",
+      "dispatcher_group": "resident-federation-cycle.cycle",
       "dispatcher_authority_effect": "NONE",
       "absent_or_invalid": "SIX_FIELD_FAIL_CLOSED_NOTHING_WRITTEN",
       "never_derived_from_clock": true
     },
     "resident-runtime/ecosystem_control.py": {
       "hb_epoch": {"from": "committed_request", "request": ".stegverse/resident-federation/cycle-request.json", "argument": "--hb-epoch"},
-      "dispatcher": ".github/workflows/resident-federation-cycle.yml",
+      "dispatcher": ".github/workflows/validation-dispatcher.yml",
+      "dispatcher_group": "resident-federation-cycle.cycle",
       "dispatcher_authority_effect": "NONE",
       "absent_or_invalid": "SIX_FIELD_FAIL_CLOSED_NOTHING_PUBLISHED",
       "never_derived_from_clock": true
@@ -45,7 +47,7 @@
       "disposition": "FAIL_CLOSED",
       "failure_code": "RUNTIME_DISPATCHER_PENDING_SUBSTRATE",
       "failed_predicate": "ACTIVATION_IS_OBSERVED_BY_AN_IN_TREE_TRANSITION",
-      "detail": "the in-tree dispatcher .github/workflows/resident-federation-cycle.yml runs on a GitHub-hosted runner, an external machine; its runs are CI_VALIDATED evidence only, not the resident-runtime observation (github_actions_is_runtime_authority false; state unchanged)",
+      "detail": "the in-tree dispatcher (task catalog group resident-federation-cycle.cycle, run by .github/workflows/validation-dispatcher.yml) runs on a GitHub-hosted runner, an external machine; its runs are CI_VALIDATED evidence only, not the resident-runtime observation (github_actions_is_runtime_authority false; state unchanged)",
       "required_evidence_or_repair": "the substrate dispatcher: a CARRIED-epoch transition from the organization ledger head that runs the resident cycle and records the observation",
       "retry_entrypoint": "WU-B13 activation",
       "owning_existing_goal": "WU-B13 activation, #3183 (INTERLOCK-INTR-RUNTIME-INDEPENDENT-PROTOCOL-001)",

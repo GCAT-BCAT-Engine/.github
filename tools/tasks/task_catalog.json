@@ -279,6 +279,100 @@
     "timeout_minutes": 10,
     "python_version": "3.11"
    }
+  },
+  {
+   "id": "resident-federation-cycle.cycle",
+   "source": {
+    "workflow": ".github/workflows/resident-federation-cycle.yml",
+    "workflow_name": "Resident Federation Cycle",
+    "job": "cycle",
+    "job_name": null,
+    "commit": "8f7c47a",
+    "triggers_before": [
+     "push"
+    ],
+    "permissions_before": {
+     "contents": "read"
+    }
+   },
+   "events": [
+    "pull_request",
+    "push"
+   ],
+   "selection": "step 1 selects the folded workflow's own trigger, a push to main touching .stegverse/resident-federation/cycle-request.json (CATALOG_EVENT_BEFORE..CATALOG_EVENT_AFTER); on any other event steps 2-5 are SKIPPED_BY_CONDITION and nothing runs",
+   "env": {},
+   "steps": [
+    {
+     "name": "Select only a push to main that changes the committed cycle request",
+     "run_file": "tools/tasks/steps/resident-federation-cycle.cycle/01-select-only-a-push-to-main-that-changes-the-committed-cycle-.sh",
+     "run_sha256": "14c93c73c6f35fb7ab48dadca22c8a014d619002c560e0c252d2e8c8ddb49e00"
+    },
+    {
+     "name": "Read the cycle inputs from the pushed commit's request",
+     "run_file": "tools/tasks/steps/resident-federation-cycle.cycle/02-read-the-cycle-inputs-from-the-pushed-commit-s-request.sh",
+     "run_sha256": "f4e82b624f9bc93ec80283bfae08e06ec31ed4fb378582781a00ff71e24f0111",
+     "if": "env.CYCLE_REQUEST_COMMITTED == 'true'"
+    },
+    {
+     "name": "Refuse an absent or invalid committed-request hb_epoch by the kernel's shared rule",
+     "run_file": "tools/tasks/steps/resident-federation-cycle.cycle/03-refuse-an-absent-or-invalid-committed-request-hb-epoch-by-th.sh",
+     "run_sha256": "e83d1a7806fc7a81cc916e187d8dfa5e9e9cf7f5e0827061c008bca537a0aada",
+     "if": "env.CYCLE_REQUEST_COMMITTED == 'true'"
+    },
+    {
+     "name": "Run the resident federation cycle once at the committed request's epoch",
+     "run_file": "tools/tasks/steps/resident-federation-cycle.cycle/04-run-the-resident-federation-cycle-once-at-the-committed-requ.sh",
+     "run_sha256": "8e1fbb1d1826c17b6105010ea57dc572fcbf0c895f6217716b416b802a8368d9",
+     "env": {
+      "STEGVERSE_ORG_FEDERATION_ROOT": "${{ runner.temp }}/federation-mesh",
+      "STEGVERSE_REPO_LEDGER_ROOT": "${{ runner.temp }}/repo-ledger",
+      "STEGVERSE_ORG_LEDGER_ROOT": "${{ runner.temp }}/org-ledger"
+     },
+     "if": "env.CYCLE_REQUEST_COMMITTED == 'true'"
+    },
+    {
+     "name": "Report the resident status at the committed request's epoch",
+     "run_file": "tools/tasks/steps/resident-federation-cycle.cycle/05-report-the-resident-status-at-the-committed-request-s-epoch.sh",
+     "run_sha256": "c055ee618b297e6d19c20956845919707d6986c9f608ebcfaf1e12c6cacf2d3c",
+     "env": {
+      "STEGVERSE_ORG_FEDERATION_ROOT": "${{ runner.temp }}/federation-mesh"
+     },
+     "if": "env.CYCLE_REQUEST_COMMITTED == 'true'"
+    }
+   ],
+   "artifacts": [],
+   "runner": {
+    "fetch_depth": "0",
+    "persist_credentials": "false",
+    "timeout_minutes": 30
+   }
+  },
+  {
+   "id": "committed-request-binding.unit",
+   "source": null,
+   "note": "catalog addition (GCAT#15), no folded source workflow",
+   "events": [
+    "pull_request",
+    "push"
+   ],
+   "env": {},
+   "steps": [
+    {
+     "name": "The committed-request binding and the trigger rule hold",
+     "run_file": "tools/tasks/steps/committed-request-binding.unit/01-the-committed-request-binding-and-the-trigger-rule-hold.sh",
+     "run_sha256": "7758881bb25756616398066cf5a912c8b014dc0cadd6fd34436d6c06a5080860",
+     "env": {
+      "STEGVERSE_REPO_LEDGER_ROOT": "${{ runner.temp }}/repo-ledger",
+      "STEGVERSE_ORG_LEDGER_ROOT": "${{ runner.temp }}/org-ledger"
+     }
+    }
+   ],
+   "artifacts": [],
+   "runner": {
+    "fetch_depth": "1",
+    "persist_credentials": "false",
+    "timeout_minutes": 30
+   }
   }
  ]
 }

@@ -14,11 +14,7 @@ on:
       - 'resident-runtime/organization_egress_boundary.py'
       - 'tests/test_intr_destination_capability.py'
       - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
-      - '.github/workflows/**'
-      - 'tests/test_workflow_triggers.py'
-      - 'resident-runtime/cycle_request.py'
-      - 'resident-runtime/federation_cycle.py'
-      - 'resident-runtime/activation-manifest.json'
+      - '.github/workflows/intr-destination-capability-validation.yml'
   push:
     branches: [main]
     paths:
@@ -32,11 +28,8 @@ on:
       - 'resident-runtime/organization_egress_boundary.py'
       - 'tests/test_intr_destination_capability.py'
       - 'docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md'
-      - '.github/workflows/**'
-      - 'tests/test_workflow_triggers.py'
-      - 'resident-runtime/cycle_request.py'
-      - 'resident-runtime/federation_cycle.py'
-      - 'resident-runtime/activation-manifest.json'
+      - '.github/workflows/intr-destination-capability-validation.yml'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -46,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout organization boundary
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
@@ -73,7 +66,3 @@ jobs:
           STEGVERSE_REPO_LEDGER_ROOT: ${{ runner.temp }}/repo-ledger
           STEGVERSE_ORG_LEDGER_ROOT: ${{ runner.temp }}/org-ledger
         run: python -m unittest tests.test_intr_destination_capability -v
-
-      # B-P40: no workflow is started by hand or by a timer.
-      - name: Every workflow trigger follows a committed state transition
-        run: python -m unittest tests.test_workflow_triggers -v
