@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Organization-resident runtime boundary for GCAT-BCAT-Engine."""
 from __future__ import annotations
-import argparse, base64, hashlib, json
-from datetime import datetime, timezone
+import argparse, base64, hashlib, importlib.util, json, os, tempfile
 from pathlib import Path
 from typing import Any, Mapping
 ROOT=Path(__file__).resolve().parents[1]; CONFIG=ROOT/"control/organization-runtime.json"
@@ -10,7 +9,13 @@ ACTIVATIONS=ROOT/"runtime/activations"; INGRESS=ROOT/"runtime/ingress"; EGRESS=R
 class RuntimeBoundaryError(ValueError): pass
 def canon(v:Any)->bytes:return json.dumps(v,sort_keys=True,separators=(",",":"),ensure_ascii=False,allow_nan=False).encode()
 def sha(v:Any)->str:return "sha256:"+hashlib.sha256(v if isinstance(v,bytes) else canon(v)).hexdigest()
-def now()->str:return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
+_spec=importlib.util.spec_from_file_location("org_kernel_runtime",ROOT/"org-kernel/kernel.py")
+kernel=importlib.util.module_from_spec(_spec); _spec.loader.exec_module(kernel)
+# A receipt references the heartbeat epoch its caller supplies, checked by the
+# kernel's shared rule before anything is written; it is never a clock reading.
+ACTIVATE_EPOCH_RETRY_ENTRYPOINT="runtime/organization_runtime.py::activate (hb_epoch=, or --hb-epoch)"
+RUNTIME_RETRY_ENTRYPOINT="runtime/organization_runtime.py::main"
+INGRESS_EPOCH_RETRY_ENTRYPOINT="runtime/organization_runtime.py::ingress (hb_epoch=, or --hb-epoch)"
 def config()->dict[str,Any]:
     v=json.loads(CONFIG.read_text())
     if v.get("organization")!="GCAT-BCAT-Engine" or v.get("runtime_owner_repo")!="GCAT-BCAT-Engine/.github": raise RuntimeBoundaryError("runtime owner mismatch")
@@ -21,23 +26,34 @@ def safe_id(v:str)->str:
     if not v or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in v): raise RuntimeBoundaryError("invalid id")
     return v
 def write_once(p:Path,v:Mapping[str,Any])->Path:
+    """Write once, atomically and resumably: a temp file then os.replace. A torn
+    earlier write that does not parse is replaced rather than refusing itself."""
     raw=json.dumps(dict(v),sort_keys=True,indent=2,ensure_ascii=False).encode()+b"\n"; p.parent.mkdir(parents=True,exist_ok=True)
     if p.exists():
         if p.read_bytes()==raw:return p
-        raise RuntimeBoundaryError("write-once collision")
-    p.write_bytes(raw)
+        try: json.loads(p.read_bytes().decode("utf-8"))
+        except ValueError: pass
+        else: raise RuntimeBoundaryError("write-once collision")
+    fd,temp=tempfile.mkstemp(prefix=".write-once-",suffix=".tmp",dir=str(p.parent))
+    try:
+        with os.fdopen(fd,"wb") as stream: stream.write(raw); stream.flush(); os.fsync(stream.fileno())
+        os.replace(temp,p)
+    finally:
+        if os.path.exists(temp): os.unlink(temp)
     if p.read_bytes()!=raw: raise RuntimeBoundaryError("write verification failed")
     return p
-def activate(activation_id:str,node_ref:str)->dict[str,Any]:
+def activate(activation_id:str,node_ref:str,hb_epoch:Any=None)->dict[str,Any]:
+    heartbeat=kernel.supplied_hb_reference(hb_epoch,retry_entrypoint=ACTIVATE_EPOCH_RETRY_ENTRYPOINT)
     config(); activation_id=safe_id(activation_id)
-    r={"schema":"stegverse.organization-runtime-activation/v1","organization":"GCAT-BCAT-Engine","runtime_owner_repo":"GCAT-BCAT-Engine/.github","activation_id":activation_id,"node_ref":node_ref,"state":"ACTIVATION_REQUESTED_NOT_OBSERVED","requested_at":now(),"credential_authority":"TV/TVC","github_actions_runtime_authority":"NONE","heartbeat_grants_execution_authority":False,"request_grants_execution_authority":False,"authority_effect":"NONE_REQUEST_ONLY"}
+    r={"schema":"stegverse.organization-runtime-activation/v1","organization":"GCAT-BCAT-Engine","runtime_owner_repo":"GCAT-BCAT-Engine/.github","activation_id":activation_id,"node_ref":node_ref,"state":"ACTIVATION_REQUESTED_NOT_OBSERVED","hb_reference":heartbeat,"credential_authority":"TV/TVC","github_actions_runtime_authority":"NONE","heartbeat_grants_execution_authority":False,"request_grants_execution_authority":False,"authority_effect":"NONE_REQUEST_ONLY"}
     r["activation_hash"]=sha(r); write_once(ACTIVATIONS/(activation_id+".json"),r); return r
 def egress(message_id:str,operation_id:str,destination:Mapping[str,str],payload:bytes,hb_reference:str|None=None)->dict[str,Any]:
     config(); message_id=safe_id(message_id)
     intent={"schema":"stegverse.universal-intr-transport/v1","protocol":"InTr","operation_id":operation_id,"packet_id":message_id,"payload_hash":sha(payload),"source":{"boundary":"ORGANIZATION","subsystem":"GCAT-BCAT-Engine:.github"},"destination":dict(destination),"boundary_path":["ORGANIZATION","EXTERNAL_OR_ADJACENT"],"interlock_required":True,"transport_semantics":{"event_triggered":True,"always_on_receiver_required":False,"second_user_device_required":False,"receiver_unavailable_disposition":"DURABLE_QUEUE_OR_EVENT_EPHEMERAL_MATERIALIZATION","exact_packet_transport_retry_allowed":True,"blind_consequence_retry_allowed":False},"authority":{"authority_transfer":False,"transport_grants_execution_authority":False,"credential_authority":"TV/TVC"}}
     env={"schema":"stegverse.organization-interlock-envelope/v1","organization":"GCAT-BCAT-Engine","direction":"EGRESS","interlock_required":True,"intr_intent":intent,"payload_base64":base64.b64encode(payload).decode(),"hb_reference":hb_reference,"heartbeat_grants_authority":False,"credential_authority":"TV/TVC","authority_effect":"NONE_TRANSPORT_ONLY"}
     env["envelope_hash"]=sha(env); write_once(EGRESS/(message_id+".json"),env); return env
-def ingress(env:Mapping[str,Any])->dict[str,Any]:
+def ingress(env:Mapping[str,Any],hb_epoch:Any=None)->dict[str,Any]:
+    heartbeat=kernel.supplied_hb_reference(hb_epoch,retry_entrypoint=INGRESS_EPOCH_RETRY_ENTRYPOINT)
     config()
     if env.get("schema")!="stegverse.organization-interlock-envelope/v1": raise RuntimeBoundaryError("schema mismatch")
     intent=env.get("intr_intent")
@@ -48,16 +64,23 @@ def ingress(env:Mapping[str,Any])->dict[str,Any]:
     except Exception as exc: raise RuntimeBoundaryError("payload invalid") from exc
     if sha(raw)!=intent.get("payload_hash"): raise RuntimeBoundaryError("payload hash mismatch")
     if intent.get("authority",{}).get("transport_grants_execution_authority") is not False: raise RuntimeBoundaryError("transport authority drift")
-    r={"schema":"stegverse.organization-interlock-ingress-receipt/v1","organization":"GCAT-BCAT-Engine","packet_id":intent.get("packet_id"),"payload_hash":intent.get("payload_hash"),"state":"INGRESS_VALIDATED_NOT_EXECUTED","validated_at":now(),"interlock_validated":True,"intr_validated":True,"execution_authorized":False,"credential_authority":"TV/TVC","authority_effect":"NONE"}
+    r={"schema":"stegverse.organization-interlock-ingress-receipt/v1","organization":"GCAT-BCAT-Engine","packet_id":intent.get("packet_id"),"payload_hash":intent.get("payload_hash"),"state":"INGRESS_VALIDATED_NOT_EXECUTED","hb_reference":heartbeat,"interlock_validated":True,"intr_validated":True,"execution_authorized":False,"credential_authority":"TV/TVC","authority_effect":"NONE"}
     r["receipt_hash"]=sha(r); write_once(INGRESS/(safe_id(str(intent.get("packet_id")))+".json"),r); return r
 def main()->int:
     ap=argparse.ArgumentParser(); sub=ap.add_subparsers(dest="cmd",required=True)
-    a=sub.add_parser("activate"); a.add_argument("--activation-id",required=True); a.add_argument("--node-ref",required=True)
+    a=sub.add_parser("activate"); a.add_argument("--activation-id",required=True); a.add_argument("--node-ref",required=True); a.add_argument("--hb-epoch",default=None)
     e=sub.add_parser("egress"); e.add_argument("--message-id",required=True); e.add_argument("--operation-id",required=True); e.add_argument("--destination-boundary",required=True); e.add_argument("--destination-subsystem",required=True); e.add_argument("--payload",required=True); e.add_argument("--hb-reference")
-    i=sub.add_parser("ingress"); i.add_argument("--file",type=Path,required=True)
+    i=sub.add_parser("ingress"); i.add_argument("--file",type=Path,required=True); i.add_argument("--hb-epoch",default=None)
     x=ap.parse_args()
-    if x.cmd=="activate": r=activate(x.activation_id,x.node_ref)
-    elif x.cmd=="egress": r=egress(x.message_id,x.operation_id,{"boundary":x.destination_boundary,"subsystem":x.destination_subsystem},x.payload.encode(),x.hb_reference)
-    else:r=ingress(json.loads(x.file.read_text()))
+    try:
+        if x.cmd=="activate": r=activate(x.activation_id,x.node_ref,x.hb_epoch)
+        elif x.cmd=="egress": r=egress(x.message_id,x.operation_id,{"boundary":x.destination_boundary,"subsystem":x.destination_subsystem},x.payload.encode(),x.hb_reference)
+        else:r=ingress(kernel.read_json_input(x.file,argument="--file",retry_entrypoint=RUNTIME_RETRY_ENTRYPOINT+" ingress"),x.hb_epoch)
+    except Exception as exc:
+        # A six-field refusal, or this boundary's own write fault as a
+        # non-terminal six-field record: never a raw OSError or traceback.
+        refusal=kernel.cli_refusal(exc,retry_entrypoint=RUNTIME_RETRY_ENTRYPOINT+" "+x.cmd)
+        if refusal is None: raise
+        print(json.dumps(refusal,sort_keys=True)); return 1
     print(json.dumps(r,sort_keys=True)); return 0
 if __name__=="__main__": raise SystemExit(main())

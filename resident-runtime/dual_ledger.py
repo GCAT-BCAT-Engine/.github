@@ -61,18 +61,22 @@ def find_repository(transition_id: str) -> dict[str, Any] | None:
 def append_repository(transition_id: str, transition_class: str, predecessor: str,
                       successor: str, evidence: Mapping[str, Any], authority_effect: str, *,
                       hb_epoch: int | None = None,
-                      idempotent_on: tuple[str, ...] | None = None) -> dict[str, Any]:
+                      idempotent_on: tuple[str, ...] | None = None,
+                      hb_provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Append one repository receipt, or return the recorded one on replay."""
     return emit.append(
         transition_id, transition_class, predecessor, successor, dict(evidence),
-        authority_effect, hb_epoch=hb_epoch, idempotent_on=idempotent_on)
+        authority_effect, hb_epoch=hb_epoch, idempotent_on=idempotent_on,
+        hb_provenance=None if hb_provenance is None else dict(hb_provenance))
 
 
 def append_organization(repository_receipt: Mapping[str, Any], transition_class: str,
                         predecessor: str, successor: str, evidence: Mapping[str, Any],
                         authority_effect: str, *, hb_epoch: int | None = None,
+                        hb_provenance: Mapping[str, Any] | None = None,
                         idempotent: bool = True) -> dict[str, Any]:
     """Append the organization receipt that preserves the repository receipt."""
     return aggregate.append(
         dict(repository_receipt), transition_class, predecessor, successor,
-        dict(evidence), authority_effect, hb_epoch=hb_epoch, idempotent=idempotent)
+        dict(evidence), authority_effect, hb_epoch=hb_epoch, idempotent=idempotent,
+        hb_provenance=None if hb_provenance is None else dict(hb_provenance))

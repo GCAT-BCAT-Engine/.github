@@ -61,10 +61,23 @@ def source_key(digest):
 
 def _document_bytes(value):
     """One serialization for every store, so a document reads back byte-identical."""
-    return json.dumps(value, indent=2, sort_keys=True).encode() + b"\n"
+    return json.dumps(value, indent=2, sort_keys=True, allow_nan=False).encode() + b"\n"
 
 
 GIT_SCHEME = "git+"
+
+
+class LedgerWriteFailed(RuntimeError):
+    """This store could not record a write: a lost comparison it could not
+    retry past, or a substrate command that failed.
+
+    A fault of the writer, not of what was written. `writer_fault` marks it for
+    callers that hold another loaded copy of this module, where the class
+    itself is a different object. A failed write publishes nothing, so the
+    same append retried later lands exactly once.
+    """
+
+    writer_fault = True
 
 
 class LedgerLocatorInvalid(ValueError):
@@ -398,7 +411,7 @@ class GitLedgerStore:
         completed = subprocess.run(["git", *args], input=stdin, capture_output=True,
                                    env=env or self._env(git_dir))
         if check and completed.returncode != 0:
-            raise RuntimeError("git " + args[0] + " failed: " + completed.stderr.decode(errors="replace").strip())
+            raise LedgerWriteFailed("git " + args[0] + " failed: " + completed.stderr.decode(errors="replace").strip())
         return completed
 
     def _tip(self):
@@ -470,7 +483,7 @@ class GitLedgerStore:
         stderr = completed.stderr.decode(errors="replace")
         if self._tip() != expected or "File exists" in stderr:
             return False
-        raise RuntimeError("git update-ref failed: " + stderr.strip())
+        raise LedgerWriteFailed("git update-ref failed: " + stderr.strip())
 
     def _refuse_replacing_immutable(self, current, key, encoded):
         if key.startswith(self._IMMUTABLE_PREFIXES) and current is not None and current != encoded:
@@ -527,7 +540,7 @@ class GitLedgerStore:
             new = self._commit(tip, {key: encoded}, "ledger put " + key)
             if new == tip or self._publish(new, tip):
                 return
-        raise RuntimeError("LEDGER_STORE_PUT_CONTENTION_EXHAUSTED")
+        raise LedgerWriteFailed("LEDGER_STORE_PUT_CONTENTION_EXHAUSTED")
 
     def list_prefix(self, prefix):
         tip = self._tip()
@@ -584,7 +597,7 @@ class GitLedgerStore:
                 new = self._commit(tip, {key: encoded}, "ledger compare-and-swap " + key)
                 if new == tip or self._publish(new, tip):
                     return True
-        raise RuntimeError("LEDGER_STORE_CAS_CONTENTION_EXHAUSTED")
+        raise LedgerWriteFailed("LEDGER_STORE_CAS_CONTENTION_EXHAUSTED")
 
     def append_transaction(self, receipt_key_name, receipt, expected_head, new_head, immutable=None):
         """Atomically publish a receipt and HEAD if HEAD still equals expected_head.
@@ -616,4 +629,4 @@ class GitLedgerStore:
                 new = self._commit(tip, writes, "ledger append " + receipt_key_name)
                 if self._publish(new, tip):
                     return True
-        raise RuntimeError("LEDGER_STORE_APPEND_CONTENTION_EXHAUSTED")
+        raise LedgerWriteFailed("LEDGER_STORE_APPEND_CONTENTION_EXHAUSTED")

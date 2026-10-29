@@ -74,6 +74,51 @@ kernel = _module("org_kernel_egress", "org-kernel/kernel.py")
 ledger = _module("dual_ledger_egress", "resident-runtime/dual_ledger.py")
 
 
+#: A crossing's heartbeat epoch is supplied by its caller and checked by the
+#: kernel's shared rule before any packet is built or frame published. An
+#: absent or invalid one is refused six-field FAIL_CLOSED; nothing is published
+#: or recorded, and no clock is read.
+EPOCH_RETRY_ENTRYPOINT = "resident-runtime/organization_egress_boundary.py::emit (hb_epoch=, or --hb-epoch)"
+CLOSE_EPOCH_RETRY_ENTRYPOINT = "resident-runtime/organization_egress_boundary.py::close (hb_epoch=, or --hb-epoch)"
+EgressEpochRefused = kernel.SuppliedEpochRefused
+
+#: A packet id binds one emission. A replay whose frame differs (another
+#: epoch) is refused six-field before the frame is published or anything is
+#: recorded, rather than published and then refused by the ledger.
+COLLISION_FAILURE_CODE = "LEDGER_RECEIPT_COLLISION"
+COLLISION_PREDICATE = "ONE_PACKET_ID_BINDS_ONE_EMISSION"
+
+
+class EmissionCollisionRefused(ValueError):
+    """A replayed emission that is not the recorded one; nothing was published or written."""
+
+    def __init__(self, refusal: Mapping[str, Any]) -> None:
+        super().__init__(refusal["failure_code"] + ": " + refusal["detail"])
+        self.disposition = refusal["disposition"]
+        self.failed_predicate = refusal["failed_predicate"]
+        self.refusal = dict(refusal)
+
+
+def collision_refusal(transition_id: str, record: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The six-field refusal when ``transition_id`` already records another emission."""
+    prior = ledger.find_repository(transition_id)
+    if prior is None:
+        return None
+    if (prior.get("predecessor_state_sha256") == record["payload_sha256"]
+            and prior.get("successor_state_sha256") == sha(dict(record))):
+        return None
+    recorded_epoch = (prior.get("hb_reference") or {}).get("epoch")
+    return {"disposition": "FAIL_CLOSED", "failure_code": COLLISION_FAILURE_CODE,
+            "failed_predicate": COLLISION_PREDICATE,
+            "detail": transition_id + " already records another emission",
+            "required_evidence_or_repair": ("replay at the epoch the packet was recorded at ("
+                                            + str(recorded_epoch) + "), or emit under a new packet id"),
+            "retry_entrypoint": EPOCH_RETRY_ENTRYPOINT,
+            "owning_existing_goal": kernel.HB_EPOCH_OWNING_EXISTING_GOAL,
+            "next_attempt": "nothing was published or written; retry with the recorded epoch",
+            "consequence_committed": False}
+
+
 class EgressRefused(Exception):
     """A refusal carrying its own disposition, so a caller is never left guessing."""
 
@@ -329,13 +374,14 @@ def _record(transition_id: str, transition_class: str, predecessor: str, success
     repository_receipt = ledger.append_repository(
         transition_id, transition_class, predecessor, successor,
         dict(record), "NONE", hb_epoch=hb_epoch, idempotent_on=idempotent)
-    epoch = repository_receipt["hb_reference"]["epoch"]
+    # The supplied epoch is forwarded, not the repository receipt's: a replayed
+    # receipt carries an epoch this call was not supplied.
     organization_receipt = ledger.append_organization(
         repository_receipt, "REPO_STATE_PROPAGATION", predecessor, successor,
         {"operation": OPERATION_ID, "intended_action": record["intended_action"],
          "disposition": record["disposition"],
          "crossed_an_organization_boundary": record["crossed_an_organization_boundary"]},
-        "NONE", hb_epoch=epoch, idempotent=True)
+        "NONE", hb_epoch=hb_epoch, idempotent=True)
     return {"repository_receipt": repository_receipt,
             "organization_receipt": organization_receipt}
 
@@ -369,6 +415,8 @@ def emit(destination_organization: Any, payload: Mapping[str, Any], *,
     carry a standing field; the value is not written onto the frame.
     """
     del standing
+    heartbeat = kernel.supplied_hb_reference(hb_epoch, retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+    hb_epoch = heartbeat["epoch"]
     origin = this_organization(root)
     try:
         if credential_authority is not None:
@@ -388,10 +436,13 @@ def emit(destination_organization: Any, payload: Mapping[str, Any], *,
             destination_service=resolved["destination_service"],
             payload=dict(payload),
             transition_reference=transition_reference, authority_effect="NONE")
-        now_ns = None
-        if hb_epoch is not None:
-            now_ns = kernel.HB_ANCHOR_UNIX_NS + max(0, int(hb_epoch) - kernel.HB_ANCHOR_EPOCH) * kernel.HB_PERIOD_NS
-        published = kernel.publish_packet(packet, root=mesh_root, now_ns=now_ns)
+        # The frame is deterministic at a supplied epoch, so the record a
+        # publication would bind is known, and checked, before it is published.
+        frame = kernel.carrier_frame(packet, epoch=hb_epoch)
+        record = emission_record(resolved, origin, packet, frame, payload)
+        collision = collision_refusal(EMITTED_CLASS + ":" + packet["packet_id"], record)
+        if collision is None:
+            published = kernel.publish_packet(packet, root=mesh_root, epoch=hb_epoch)
     except EgressRefused as exc:
         record = emit_refusal_record(exc.failed_predicate, exc.reason,
                                      destination_organization, origin, payload)
@@ -404,6 +455,8 @@ def emit(destination_organization: Any, payload: Mapping[str, Any], *,
         appended = _record(EMIT_REFUSED_CLASS + ":" + sha(record)[7:23], EMIT_REFUSED_CLASS,
                            record["payload_sha256"], sha(record), record, hb_epoch)
         return _refusal_result(record, appended)
+    if collision is not None:
+        raise EmissionCollisionRefused(collision)
 
     record = emission_record(resolved, origin, packet, published["frame"], payload)
     appended = _record(EMITTED_CLASS + ":" + packet["packet_id"], EMITTED_CLASS,
@@ -506,6 +559,8 @@ def close(destination_organization: str, packet_id: str, communication_id: str, 
             "destination_organization": resolved["destination_organization"],
             "authority_effect": "NONE_OBSERVATION_ONLY",
         }
+    hb_epoch = kernel.supplied_hb_reference(
+        hb_epoch, retry_entrypoint=CLOSE_EPOCH_RETRY_ENTRYPOINT)["epoch"]
     response = responses[0]
     emission = recorded_emission(packet_id)
     findings = verify_closure(resolved, packet_id, response, emission)
@@ -547,7 +602,8 @@ def main() -> int:
     parser.add_argument("--payload", type=Path)
     parser.add_argument("--standing", type=Path)
     parser.add_argument("--transition-reference", default="ecosystem.transition.interorg.v1")
-    parser.add_argument("--hb-epoch", type=int, default=None)
+    parser.add_argument("--hb-epoch", default=None,
+                        help="heartbeat epoch, ASCII digits >= 32; refused when absent or invalid")
     parser.add_argument("--close", action="store_true")
     parser.add_argument("--packet-id")
     parser.add_argument("--communication-id")
@@ -555,26 +611,39 @@ def main() -> int:
     parser.add_argument("--mesh-root", type=Path)
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
-    if args.close:
-        if not args.packet_id or not args.communication_id:
-            raise SystemExit("--close requires --packet-id and --communication-id")
-        result = close(args.destination_organization, args.packet_id, args.communication_id,
-                       mesh_root=args.mesh_root, hb_epoch=args.hb_epoch)
-    else:
-        if args.payload is None or args.standing is None:
-            raise SystemExit("emit requires --payload and --standing")
-        standing = json.loads(args.standing.read_text(encoding="utf-8"))
-        payload = json.loads(args.payload.read_text(encoding="utf-8"))
-        result = emit(args.destination_organization, payload, standing=standing,
-                      capability=args.capability, transition_reference=args.transition_reference,
-                      mesh_root=args.mesh_root, hb_epoch=args.hb_epoch)
-    rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(rendered, encoding="utf-8")
+    try:
+        result = _run(args)
+        if args.out:
+            kernel.write_json_atomic(args.out, result)
+    except Exception as exc:
+        # An epoch, provenance or collision refusal, from whichever kernel or
+        # ledger copy refused it: read by its six-field `refusal`, not its class.
+        # This boundary's own write fault is non-terminal six-field. Never a
+        # raw OSError or traceback.
+        refusal = kernel.cli_refusal(exc, retry_entrypoint=CLOSE_EPOCH_RETRY_ENTRYPOINT if args.close
+                                     else EPOCH_RETRY_ENTRYPOINT)
+        if refusal is None:
+            raise
+        print(json.dumps(refusal, sort_keys=True))
+        return 1
     print(json.dumps(result, sort_keys=True))
     return 0 if result.get("disposition") in {ALLOW, PENDING} else 1
 
+
+def _run(args) -> dict[str, Any]:
+    if args.close:
+        if not args.packet_id or not args.communication_id:
+            raise SystemExit("--close requires --packet-id and --communication-id")
+        return close(args.destination_organization, args.packet_id, args.communication_id,
+                     mesh_root=args.mesh_root, hb_epoch=args.hb_epoch)
+    if args.payload is None or args.standing is None:
+        raise SystemExit("emit requires --payload and --standing")
+    standing = kernel.read_json_input(args.standing, argument="--standing", retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+    payload = kernel.read_json_input(args.payload, argument="--payload", retry_entrypoint=EPOCH_RETRY_ENTRYPOINT,
+                                     expect=None)
+    return emit(args.destination_organization, payload, standing=standing,
+                capability=args.capability, transition_reference=args.transition_reference,
+                mesh_root=args.mesh_root, hb_epoch=args.hb_epoch)
 
 if __name__ == "__main__":
     sys.exit(main())

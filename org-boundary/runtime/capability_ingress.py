@@ -161,6 +161,20 @@ def resolve(root: Path, service: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+_BINDER: Any = None
+
+
+def _committed_request_binding(root: Path):
+    """The organization's resident-runtime/committed_request_binding.py, loaded once."""
+    global _BINDER
+    if _BINDER is None:
+        spec = importlib.util.spec_from_file_location(
+            "committed_request_binding", Path(root) / "resident-runtime/committed_request_binding.py")
+        _BINDER = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_BINDER)
+    return _BINDER
+
+
 def load_operation(resolved: Mapping[str, Any]):
     """Load the bound operation and refuse one that is not the operation bound.
 
@@ -256,12 +270,17 @@ def declared_manifest(payload: Any) -> dict[str, Any]:
 
 
 def receive(root: Path, service: Mapping[str, Any], packet: Mapping[str, Any], *, registry: Mapping[str, Any],
-            mesh_root: Path | None = None) -> dict[str, Any]:
+            mesh_root: Path | None = None, hb_epoch: int | None = None,
+            hb_provenance: Mapping[str, Any] | None = None,
+            committed_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Hand an addressed submission to the receiving operation the overlay binds.
 
     The operation records its own dispositions at both ledger levels; this
     returns what it reported. A refusal is returned as the operation stated it,
-    not retried into an admission.
+    not retried into an admission. ``hb_epoch`` is the epoch the carrier frame
+    carried, validated by the kernel at ingest; it is the operation's supplied
+    epoch for everything done in response to that frame. ``hb_provenance`` is
+    the frame's verified CARRIED claim, handed on so its receipts read as CARRIED.
     """
     resolved = resolve(root, service)
     # The overlay says how this capability's submission is read. A payload the
@@ -271,9 +290,26 @@ def receive(root: Path, service: Mapping[str, Any], packet: Mapping[str, Any], *
     binding = binding_for_service(root, service.get("service_id"))
     submission = submission_for(binding, packet.get("payload"))
     module = load_operation(resolved)
+    # The receiving operation is the InTr lane's and does not record the
+    # committed request; this boundary binds it to the receipts the operation
+    # wrote, with a companion receipt on the committed-request-bindings chain
+    # folded into their commit (committed_request_binding.py).
+    # The bindings chain is read back first: a torn one defers the frame before
+    # any receipt is written that could not then be bound.
+    if committed_request is not None:
+        binder = _committed_request_binding(root)
+        org_store = binder.stores()[0]
+        binder.preflight(org_store)
+        since_tip = binder.tip(org_store)
     result = module.receive(submission, registry=registry, standing=packet.get("standing"),
                             packet_id=str(packet.get("packet_id") or resolved["receiving_operation_id"]),
-                            mesh_root=mesh_root)
+                            mesh_root=mesh_root, hb_epoch=hb_epoch, hb_provenance=hb_provenance)
+    binding = None
+    if committed_request is not None and isinstance(result, Mapping) and result.get("organization_receipt_sha256"):
+        binding = binder.bind(committed_request,
+                              repository_receipt_sha256=result.get("repository_receipt_sha256"),
+                              organization_receipt_sha256=result["organization_receipt_sha256"],
+                              hb_epoch=hb_epoch, since_tip=since_tip, own_writes=True)
     return {
         "capability_received": True,
         "capability_profile_id": resolved["capability_profile_id"],
@@ -289,4 +325,5 @@ def receive(root: Path, service: Mapping[str, Any], packet: Mapping[str, Any], *
         "route_admissibility": ROUTE_ADMISSIBILITY,
         "addressability_grants_admission_authority": False,
         "receiving_operation_result": result,
+        **({} if binding is None else {"committed_request_binding": binding}),
     }

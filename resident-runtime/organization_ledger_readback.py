@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -244,6 +245,14 @@ def recorded_for(location, canonical_manifest_sha256):
                  if r["predecessor_org_state_sha256"] == state), None)
 
 
+def _committed_request_binding():
+    path = Path(__file__).resolve().parent / "committed_request_binding.py"
+    spec = importlib.util.spec_from_file_location("committed_request_binding_for_readback", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--location", required=True, help="ledger locator, e.g. git+<repo>#<ref>")
@@ -255,6 +264,8 @@ def main():
                         help="print the receipt already binding this manifest, or nothing")
     parser.add_argument("--repository-namespace", default=None,
                         help="also read back the repository chain kept in this subtree of the same ref")
+    parser.add_argument("--committed-request", default=None, metavar="PATH=sha256:<hex>",
+                        help="also read back the committed-request binding of the ingress receipt")
     args = parser.parse_args()
     if args.recorded_for:
         print(recorded_for(args.location, args.recorded_for) or "")
@@ -266,6 +277,20 @@ def main():
         if args.repository_namespace:
             result["repository_ledger"] = repository_readback(
                 args.location, args.repository_namespace, result, ingress)
+        if args.committed_request:
+            # The committed request that triggered the ingress is bound to its
+            # receipts on the committed-request-bindings chain of this same
+            # ref; a missing or mismatched binding is never a silent ALLOW.
+            binder = _committed_request_binding()
+            locator = parse_locator(args.location)
+            try:
+                result["committed_request_binding"] = binder.verify(
+                    org_store=open_store(locator),
+                    repo_store=open_store(str(locator) + ":" + (args.repository_namespace or "")),
+                    expected=[(args.committed_request, (ingress or {}).get("organization_receipt_sha256"))])
+            except (binder.BindingRefused, binder.BindingWriteFault) as refused:
+                result, code = {"schema": "stegverse.organization-ledger-readback/v1", "location": args.location,
+                                **refused.refusal, "authority_effect": "NONE_READBACK_ONLY"}, 1
     except (ReadbackRefused, ValueError, RuntimeError, FileNotFoundError) as exc:
         result, code = {
             "schema": "stegverse.organization-ledger-readback/v1",

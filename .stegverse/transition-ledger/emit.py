@@ -13,7 +13,7 @@ kernel=importlib.util.module_from_spec(_spec);_spec.loader.exec_module(kernel)
 # this one addresses the same store so it does too.
 _sspec=importlib.util.spec_from_file_location("ledger_store",ROOT/"resident-runtime/ledger_store.py")
 ledger_store=importlib.util.module_from_spec(_sspec);_sspec.loader.exec_module(ledger_store)
-def canon(v):return json.dumps(v,sort_keys=True,separators=(",",":"),ensure_ascii=False).encode()
+def canon(v):return json.dumps(v,sort_keys=True,separators=(",",":"),ensure_ascii=False,allow_nan=False).encode()
 def sha(v):return "sha256:"+hashlib.sha256(v if isinstance(v,(bytes,bytearray)) else canon(v)).hexdigest()
 def lr():
  o=os.getenv("STEGVERSE_REPO_LEDGER_ROOT")
@@ -70,7 +70,15 @@ def recorded(target,head,transition_id,transition_class):
   if found is None and receipt.get("transition_id")==transition_id and receipt.get("transition_class")==transition_class:found=receipt
  return found
 _ABSENT=object()
-def append(transition_id,transition_class,predecessor_state_sha256,successor_state_sha256,evidence=None,authority_effect="NONE",hb_epoch=None,store=None,idempotent_on=None):
+# A receipt's heartbeat reference is supplied by the caller. Falling back to
+# kernel.hb_reference() read the host clock, so a caller that forgot the epoch
+# minted a receipt whose time base no caller ever stated. The kernel's shared
+# rule (SUBMISSION_CARRIES_THE_SUPPLIED_HB_EPOCH) now checks it before the store
+# is opened: an absent epoch is HB_EPOCH_NOT_SUPPLIED, an invalid one
+# HB_EPOCH_INVALID, and no clock is read.
+EPOCH_RETRY_ENTRYPOINT=".stegverse/transition-ledger/emit.py::append (hb_epoch=, or --hb-epoch)"
+RepoLedgerEpochRefused=kernel.SuppliedEpochRefused
+def append(transition_id,transition_class,predecessor_state_sha256,successor_state_sha256,evidence=None,authority_effect="NONE",hb_epoch=None,store=None,idempotent_on=None,hb_provenance=None):
  """Append one repository transition receipt through the substrate transaction.
 
  With `idempotent_on` (a tuple of evidence keys, possibly empty) a transition
@@ -87,7 +95,17 @@ def append(transition_id,transition_class,predecessor_state_sha256,successor_sta
  Every attempt, idempotent or not, first verifies the whole chain reachable
  from HEAD and raises `RepoLedgerChainBreak` on a missing or corrupted node,
  so no receipt is ever minted on top of a broken chain.
+
+ An attempt whose `hb_epoch` is absent or invalid raises
+ `RepoLedgerEpochRefused` before the store is opened; the heartbeat reference
+ is never read from the host clock. `hb_provenance`, a CARRIED claim's
+ `source` and `head_receipt_sha`, is verified against the current
+ organization ledger head and kept on the reference, or refused
+ CARRIED_PROVENANCE_UNVERIFIED before the store is opened.
  """
+ hb_ref=kernel.supplied_hb_reference(hb_epoch,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT,provenance=hb_provenance)
+ # A committed request is never taken from caller evidence (FORGED_COMMITTED_REQUEST_FROM_EVIDENCE_JSON).
+ kernel.refuse_caller_committed_request(evidence,argument="evidence",retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
  target=store or ledger_store.open_store(lr());target.initialize()
  for _attempt in range(128):
   expected_head=target.get(ledger_store.HEAD_KEY)
@@ -102,17 +120,31 @@ def append(transition_id,transition_class,predecessor_state_sha256,successor_sta
        or any(theirs.get(k,_ABSENT)!=mine.get(k,_ABSENT) for k in idempotent_on)):
     raise ValueError("ledger_receipt_collision")
    return prior
-  b={"schema":"stegverse.repo-transition-receipt/v1","repository":C["repository"],"transition_id":transition_id,"transition_class":transition_class,"predecessor_state_sha256":predecessor_state_sha256,"successor_state_sha256":successor_state_sha256,"evidence":evidence if evidence is not None else {},"authority_effect":authority_effect,"hb_reference":kernel.hb_reference(epoch=hb_epoch) if hb_epoch is not None else kernel.hb_reference(),"previous_receipt_sha256":prev}
+  b={"schema":"stegverse.repo-transition-receipt/v1","repository":C["repository"],"transition_id":transition_id,"transition_class":transition_class,"predecessor_state_sha256":predecessor_state_sha256,"successor_state_sha256":successor_state_sha256,"evidence":evidence if evidence is not None else {},"authority_effect":authority_effect,"hb_reference":hb_ref,"previous_receipt_sha256":prev}
   dg=sha(b);r={**b,"receipt_sha256":dg};key=ledger_store.receipt_key(dg)
   new_head={"repository":C["repository"],"receipt_sha256":dg,"receipt_path":target.locator(key)}
   if target.append_transaction(key,r,expected_head,new_head):
    return r
- raise SystemExit("REPO_LEDGER_APPEND_CONTENTION_EXHAUSTED")
+ raise ledger_store.LedgerWriteFailed("REPO_LEDGER_APPEND_CONTENTION_EXHAUSTED")
 
 def main():
- p=argparse.ArgumentParser();p.add_argument("--transition-id",required=True);p.add_argument("--transition-class",required=True);p.add_argument("--predecessor-state-sha256",required=True);p.add_argument("--successor-state-sha256",required=True);p.add_argument("--evidence-json",default="{}");p.add_argument("--authority-effect",default="NONE");p.add_argument("--hb-epoch",type=int,default=None,help="heartbeat epoch; derived from the host clock, and marked as derived, when absent");a=p.parse_args()
- try:r=append(a.transition_id,a.transition_class,a.predecessor_state_sha256,a.successor_state_sha256,json.loads(a.evidence_json),a.authority_effect,a.hb_epoch)
+ p=argparse.ArgumentParser();p.add_argument("--transition-id",required=True);p.add_argument("--transition-class",required=True);p.add_argument("--predecessor-state-sha256",required=True);p.add_argument("--successor-state-sha256",required=True);p.add_argument("--evidence-json",default="{}");p.add_argument("--authority-effect",default="NONE");p.add_argument("--hb-epoch",default=None,help="heartbeat epoch, ASCII digits >= 32; the append refuses when absent or invalid");a=p.parse_args()
+ # Every input is read before any write; a bad one is the caller's terminal fault.
+ try:evidence=kernel.read_json_input(a.evidence_json,argument="--evidence-json",inline=True,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+ except kernel.InputRefused as exc:
+  print(json.dumps(exc.refusal,sort_keys=True));raise SystemExit(1)
+ # A rerun of the same transition (id, class, states, authority, evidence) returns the
+ # recorded receipt, so a fault after HEAD was published never mints a second one.
+ try:r=append(a.transition_id,a.transition_class,a.predecessor_state_sha256,a.successor_state_sha256,evidence,a.authority_effect,a.hb_epoch,idempotent_on=tuple(sorted(evidence)))
  except RepoLedgerChainBreak as exc:
   print(json.dumps(chain_break_refusal(exc),sort_keys=True));raise SystemExit(1)
+ except (RepoLedgerEpochRefused,kernel.CallerEvidenceRefused) as exc:
+  print(json.dumps(exc.refusal,sort_keys=True));raise SystemExit(1)
+ except ValueError as exc:
+  if str(exc)!="ledger_receipt_collision":raise
+  print(json.dumps(kernel.collision_refusal(a.transition_id,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT),sort_keys=True));raise SystemExit(1)
+ except (ledger_store.LedgerWriteFailed,OSError) as exc:
+  # This boundary's own write fault: non-terminal six-field, never a traceback.
+  print(json.dumps(kernel.writer_fault_refusal(exc,retry_entrypoint=EPOCH_RETRY_ENTRYPOINT),sort_keys=True));raise SystemExit(1)
  print(json.dumps(r,sort_keys=True))
 if __name__=="__main__":main()

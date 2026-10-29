@@ -76,6 +76,12 @@ def _module(name: str, relative: str):
 
 
 ledger = _module("dual_ledger", "resident-runtime/dual_ledger.py")
+kernel = _module("kernel", "org-kernel/kernel.py")
+
+# The command's --hb-epoch is read as text and checked by the shared
+# supplied-epoch rule before anything is written; argparse does not coerce it.
+EPOCH_RETRY_ENTRYPOINT = "resident-runtime/intr_destination_ingress.py::main --hb-epoch"
+
 #: The two writers dual_ledger appends through, named as the other organizations'
 #: ingress names them (merge_transfer, intr_path_transfer, ledger_gitstore bind these).
 repository_ledger = ledger.emit
@@ -202,17 +208,21 @@ def _two_level_atomic():
 
 
 def _append(transition_class: str, packet_id: str, evidence: Mapping[str, Any],
-            hb_epoch: int | None, *, operation: str = OPERATION_ID, profile_id: str = PROFILE_ID,
+            hb_epoch: int | None,
+            hb_provenance: Mapping[str, Any] | None = None, *, operation: str = OPERATION_ID,
+            profile_id: str = PROFILE_ID,
             boundary_extra: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
     """Append at both levels, all or nothing (see _two_level_atomic); a refusal of either
     location raises ledger_gitstore.TwoLevelAppendRefused (a ValueError) before any write."""
     with _two_level_atomic():
-        return _append_halves(transition_class, packet_id, evidence, hb_epoch, operation=operation,
-                              profile_id=profile_id, boundary_extra=boundary_extra)
+        return _append_halves(transition_class, packet_id, evidence, hb_epoch, hb_provenance,
+                              operation=operation, profile_id=profile_id, boundary_extra=boundary_extra)
 
 
 def _append_halves(transition_class: str, packet_id: str, evidence: Mapping[str, Any],
-                   hb_epoch: int | None, *, operation: str = OPERATION_ID, profile_id: str = PROFILE_ID,
+                   hb_epoch: int | None,
+                   hb_provenance: Mapping[str, Any] | None = None, *, operation: str = OPERATION_ID,
+                   profile_id: str = PROFILE_ID,
                    boundary_extra: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], bool]:
     """Append at both levels. A replay of the same packet returns the recorded pair.
 
@@ -227,33 +237,45 @@ def _append_halves(transition_class: str, packet_id: str, evidence: Mapping[str,
     prior = ledger.find_repository(transition_id)
     repository_receipt = ledger.append_repository(
         transition_id, transition_class, predecessor, successor, dict(evidence),
-        "NONE", hb_epoch=hb_epoch,
+        "NONE", hb_epoch=hb_epoch, hb_provenance=hb_provenance,
         idempotent_on=("communication_id", "payload_sha256", "disposition"))
-    epoch = repository_receipt["hb_reference"]["epoch"]
+    # The organization receipt references the epoch this call was supplied,
+    # never one read back from the repository receipt: a replay returns the
+    # recorded receipt, whose epoch was not supplied to this call.
     organization_receipt = ledger.append_organization(
         repository_receipt, "REPO_STATE_PROPAGATION", predecessor, successor,
         {"operation": operation, "profile_id": profile_id,
          "disposition": evidence["disposition"],
          "communication_id": evidence.get("communication_id"), **dict(boundary_extra or {})},
-        "NONE", hb_epoch=epoch, idempotent=True)
+        "NONE", hb_epoch=hb_epoch, hb_provenance=hb_provenance, idempotent=True)
     return ({"repository_receipt": repository_receipt,
              "organization_receipt": organization_receipt}, prior is not None)
 
 
 def _recorded(disposition: str, payload: Any, packet_id: str, hb_epoch: int | None, *,
-              failed_predicate: str | None = None, detail: str | None = None) -> dict[str, Any]:
+              failed_predicate: str | None = None, detail: str | None = None,
+              hb_provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
     evidence = _evidence(payload, packet_id, disposition,
                          failed_predicate=failed_predicate, detail=detail)
     transition_class = OPERATION_ID if disposition == ALLOW else REFUSED_CLASS
     try:
-        appended, replayed = _append(transition_class, packet_id, evidence, hb_epoch)
+        appended, replayed = _append(transition_class, packet_id, evidence, hb_epoch, hb_provenance)
     except ValueError as exc:
         if str(exc) != "ledger_receipt_collision":
             raise
         collided = _evidence(payload, packet_id, FAIL_CLOSED,
                              failed_predicate="ONE_PACKET_ID_BINDS_ONE_DIAGNOSTIC",
                              detail=str(exc))
-        return _result(collided, None, replayed=False, received=False)
+        # A content collision: this packet id already records another
+        # diagnostic. It is refused before any write, six fields; a
+        # byte-identical replay is not a collision and stays idempotent.
+        return {**_result(collided, None, replayed=False, received=False),
+                "failure_code": "LEDGER_RECEIPT_COLLISION",
+                "required_evidence_or_repair": "send the recorded diagnostic unchanged, or use a new packet id",
+                "retry_entrypoint": "resident-runtime/intr_destination_ingress.py::receive",
+                "owning_existing_goal": kernel.HB_EPOCH_OWNING_EXISTING_GOAL,
+                "next_attempt": "nothing was written; a byte-identical replay returns the recorded pair",
+                "consequence_committed": False}
     return _result(evidence, appended, replayed=replayed, received=disposition == ALLOW)
 
 
@@ -286,7 +308,8 @@ def self_close(communication_id: str, *, registry: Mapping[str, Any],
 
 def receive(payload: Any, *, registry: Mapping[str, Any], standing: Mapping[str, Any] | None = None,
             packet_id: str = "organization-intr-destination",
-            hb_epoch: int | None = None, mesh_root: Path | None = None) -> dict[str, Any]:
+            hb_epoch: int | None = None, mesh_root: Path | None = None,
+            hb_provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Acknowledge one diagnostic, or record the refusal.
 
     ``standing`` and ``mesh_root`` are accepted because the capability resolver
@@ -295,14 +318,14 @@ def receive(payload: Any, *, registry: Mapping[str, Any], standing: Mapping[str,
     """
     del standing, mesh_root
     if not isinstance(registry, Mapping):
-        return _recorded(DENY, payload, packet_id, hb_epoch,
+        return _recorded(DENY, payload, packet_id, hb_epoch, hb_provenance=hb_provenance,
                          failed_predicate="CAPABILITY_MAP_IS_A_MAPPING",
                          detail="registry is not an object")
     refusal = shape_refusal(payload)
     if refusal is not None:
-        return _recorded(DENY, payload, packet_id, hb_epoch,
+        return _recorded(DENY, payload, packet_id, hb_epoch, hb_provenance=hb_provenance,
                          failed_predicate=refusal[0], detail=refusal[1])
-    return _recorded(ALLOW, payload, packet_id, hb_epoch)
+    return _recorded(ALLOW, payload, packet_id, hb_epoch, hb_provenance=hb_provenance)
 
 
 def main() -> int:
@@ -313,27 +336,51 @@ def main() -> int:
     parser.add_argument("--communication-id")
     parser.add_argument("--registry", type=Path, required=True)
     parser.add_argument("--packet-id", default=None)
-    parser.add_argument("--hb-epoch", type=int, default=None)
+    parser.add_argument("--hb-epoch", type=str, default=None)
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
-    registry = json.loads(args.registry.read_text(encoding="utf-8"))
-    if args.self_close:
-        if not args.communication_id:
-            parser.error("--self-close requires --communication-id")
-        result = self_close(args.communication_id, registry=registry,
-                            packet_id=args.packet_id, hb_epoch=args.hb_epoch)
-    elif args.payload is not None:
-        result = receive(
-            json.loads(args.payload.read_text(encoding="utf-8")),
-            registry=registry,
-            packet_id=args.packet_id or "organization-intr-destination",
-            hb_epoch=args.hb_epoch)
-    else:
+    if args.self_close and not args.communication_id:
+        parser.error("--self-close requires --communication-id")
+    if not args.self_close and args.payload is None:
         parser.error("one of --payload or --self-close is required")
-    rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(rendered, encoding="utf-8")
+    try:
+        hb_epoch = kernel.supplied_hb_reference(
+            args.hb_epoch, retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)["epoch"]
+    except kernel.SuppliedEpochRefused as exc:
+        print(json.dumps(exc.refusal, sort_keys=True))
+        return 1
+    # Every input is read before any write and outside the own-state fault
+    # classifier; a bad one is the caller's terminal fault.
+    try:
+        registry = kernel.read_json_input(args.registry, argument="--registry",
+                                          retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+        payload = (None if args.self_close else kernel.read_json_input(
+            args.payload, argument="--payload", retry_entrypoint=EPOCH_RETRY_ENTRYPOINT, expect=None))
+    except kernel.InputRefused as exc:
+        print(json.dumps(exc.refusal, sort_keys=True))
+        return 1
+    try:
+        if args.self_close:
+            result = self_close(args.communication_id, registry=registry,
+                                packet_id=args.packet_id, hb_epoch=hb_epoch)
+        else:
+            result = receive(
+                payload,
+                registry=registry,
+                packet_id=args.packet_id or "organization-intr-destination",
+                hb_epoch=hb_epoch)
+        if args.out:
+            kernel.write_json_atomic(args.out, result)
+    except Exception as exc:
+        # A ledger writer's six-field refusal (for example a source receipt of
+        # clock provenance), from whichever kernel copy refused it; or this
+        # boundary's own write fault, as non-terminal six-field. Never a raw
+        # OSError or traceback.
+        refusal = kernel.cli_refusal(exc, retry_entrypoint=EPOCH_RETRY_ENTRYPOINT)
+        if refusal is None:
+            raise
+        print(json.dumps(refusal, sort_keys=True))
+        return 1
     print(json.dumps(result, sort_keys=True))
     return 0 if result.get("disposition") == ALLOW else 1
 

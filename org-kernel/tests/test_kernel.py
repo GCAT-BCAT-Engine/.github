@@ -11,7 +11,9 @@ with tempfile.TemporaryDirectory() as td:
  "carrier":{"kind":"HB_DERIVED","reference":"canonical"},"intr_profile":"stegverse.intr.org-boundary.v1",
  "transition":{"reference":"diagnostic","authority_effect":"NONE"},"payload":{"probe":"ping"},
  "evidence":{"ingress_receipt":None,"dispatch_receipt":None,"consumption_receipt":None,"egress_receipt":None,"reconstruction_reference":None}}
- frame=k.carrier_frame(packet,now_ns=k.HB_ANCHOR_UNIX_NS+1_000_000_000)
+ clock_frame=k.carrier_frame(packet,now_ns=k.HB_ANCHOR_UNIX_NS+1_000_000_000)
+ clocked=k.ingest_frame(root,clock_frame); assert clocked["status"]=="CONSUMED" and clocked["hb_epoch"] is None
+ frame=k.carrier_frame(packet,epoch=4096)
  recovered=k.recover_packet(frame); assert recovered==packet
  out=k.ingest_frame(root,frame); assert out["status"]=="CONSUMED"; assert out["execution_result"]["reconstruction"]["status"]=="RECONSTRUCTED"
  assert [x["kind"] for x in out["execution_result"]["receipts"]]==["INGRESS_ACCEPTED","DISPATCHED","CONSUMED","RESULT_BOUND","EGRESS_EMITTED"]

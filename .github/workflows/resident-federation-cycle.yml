@@ -1,0 +1,68 @@
+name: Resident Federation Cycle
+
+# The in-tree dispatcher the activation manifest binds in epoch_bindings. A
+# push to main that changes .stegverse/resident-federation/cycle-request.json
+# (the committed state transition; resident-runtime/cycle_request.py reads it)
+# runs the resident cycle entrypoint (federation_cycle.py) and the ecosystem
+# status (ecosystem_control.py) once, at the request's hb_epoch, over the
+# repository-local spool. No dispatch input, schedule or pull_request runs it,
+# and no clock is read for the epoch (the COMMITTED_REQUEST rule).
+#
+# The mesh and both ledger roots are runner-temporary. Nothing is pushed and
+# the receipts are not production receipts.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.stegverse/resident-federation/cycle-request.json'
+
+permissions:
+  contents: read
+
+jobs:
+  cycle:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout organization boundary
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Read the cycle inputs from the pushed commit's request
+        run: |
+          python resident-runtime/cycle_request.py --request .stegverse/resident-federation/cycle-request.json --github-env "$GITHUB_ENV"
+
+      # The committed request's hb_epoch is the only epoch this cycle uses. It is
+      # checked by the kernel's shared rule before any entrypoint runs: absent is
+      # HB_EPOCH_NOT_SUPPLIED, malformed is HB_EPOCH_INVALID, six-field; nothing
+      # runs, and no clock, ledger or ref is read for it.
+      - name: Refuse an absent or invalid committed-request hb_epoch by the kernel's shared rule
+        run: |
+          python - <<'PY'
+          import importlib.util, json, os, sys
+          spec = importlib.util.spec_from_file_location("kernel", "org-kernel/kernel.py")
+          kernel = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(kernel)
+          refusal = kernel.writer_epoch_refusal(
+              os.environ.get("HB_EPOCH") or None,
+              retry_entrypoint=".github/workflows/resident-federation-cycle.yml (.stegverse/resident-federation/cycle-request.json hb_epoch)")
+          if refusal is not None:
+              print(json.dumps(refusal, sort_keys=True))
+              sys.exit(1)
+          print("COMMITTED_REQUEST_HB_EPOCH=SUPPLIED")
+          PY
+
+      - name: Run the resident federation cycle once at the committed request's epoch
+        env:
+          STEGVERSE_ORG_FEDERATION_ROOT: ${{ runner.temp }}/federation-mesh
+          STEGVERSE_REPO_LEDGER_ROOT: ${{ runner.temp }}/repo-ledger
+          STEGVERSE_ORG_LEDGER_ROOT: ${{ runner.temp }}/org-ledger
+        run: |
+          python resident-runtime/federation_cycle.py --hb-epoch "$HB_EPOCH" --committed-request ".stegverse/resident-federation/cycle-request.json=$CYCLE_REQUEST_SHA256"
+
+      - name: Report the resident status at the committed request's epoch
+        env:
+          STEGVERSE_ORG_FEDERATION_ROOT: ${{ runner.temp }}/federation-mesh
+        run: |
+          python resident-runtime/ecosystem_control.py status --hb-epoch "$HB_EPOCH"
