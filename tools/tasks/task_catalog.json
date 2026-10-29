@@ -5,9 +5,9 @@
  "authority": "Rigel 2026-10-24 retroactive G17 enforcement (StegVerse-org/.github#166); pattern StegVerse-Labs/StegDB#60 (eab2e773)",
  "dispatcher": ".github/workflows/validation-dispatcher.yml",
  "runner": "tools/tasks/run_catalog.py",
- "runner_source": "StegVerse-Labs/StegDB tools/tasks/run_catalog.py @ eab2e773271f3e63466a710f1b4555f677882848 (sha256 f741f30557888fd8e4852a52adfc65736a08898d49ade7519f6bcc2672921e9b), copied unmodified",
+ "runner_source": "StegVerse-Labs/StegDB tools/tasks/run_catalog.py @ eab2e773271f3e63466a710f1b4555f677882848 (sha256 f741f30557888fd8e4852a52adfc65736a08898d49ade7519f6bcc2672921e9b), copied unmodified; then patched with the original-path-filter selection (matrix marks cells selected; StegVerse-Labs/Site#1647 pattern), so it no longer equals that sha256",
  "rule": "Every check a folded workflow job ran is one group here; its step bodies are the original run blocks byte for byte, pinned by sha256, except the repairs listed. A new check is a new group (or a step in one), never a new workflow file.",
- "path_filters": "Dropped: every group runs on every pull_request and push to main (a superset of the original path-filtered runs). workflow_dispatch/schedule triggers are not carried (no manual dispatch, no cron).",
+ "path_filters": "Restored: each folded group carries its original workflow's push / pull_request paths or paths-ignore filter as path_filters (a folded workflow's own path names its tools/tasks/folded copy and its tools/tasks/steps directory). A group the event's changed files do not select records NOT_SELECTED and exits 0 (a run, never a skipped job; pattern StegVerse-org/StegVerse-SDK#561, StegVerse-Labs/Site#1647). Not carried: branches filters, workflow_dispatch/schedule triggers (no manual dispatch, no cron), job-level if, and GitHub's 300-changed-file rule (an undeterminable diff selects every group).",
  "repairs": [
   "The four validators used push/pull_request triggers (org-boundary-execution push-only, some path-filtered); as catalog groups they run on every pull request and push to main (a superset). Their workflow_dispatch triggers are not carried."
  ],
@@ -56,6 +56,46 @@
     "fetch_depth": "1",
     "persist_credentials": "false",
     "timeout_minutes": 30
+   },
+   "path_filters": {
+    "pull_request": {
+     "paths": [
+      "org-boundary/runtime/capability_ingress.py",
+      "org-boundary/registry/services.json",
+      "org-kernel/kernel.py",
+      "org-runtime/interlock-intr.json",
+      "org-runtime/runtime_boundary.py",
+      "resident-runtime/dual_ledger.py",
+      "resident-runtime/intr_destination_ingress.py",
+      "resident-runtime/organization_egress_boundary.py",
+      "tests/test_intr_destination_capability.py",
+      "docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md",
+      ".github/workflows/**",
+      "tests/test_workflow_triggers.py",
+      "resident-runtime/cycle_request.py",
+      "resident-runtime/federation_cycle.py",
+      "resident-runtime/activation-manifest.json"
+     ]
+    },
+    "push": {
+     "paths": [
+      "org-boundary/runtime/capability_ingress.py",
+      "org-boundary/registry/services.json",
+      "org-kernel/kernel.py",
+      "org-runtime/interlock-intr.json",
+      "org-runtime/runtime_boundary.py",
+      "resident-runtime/dual_ledger.py",
+      "resident-runtime/intr_destination_ingress.py",
+      "resident-runtime/organization_egress_boundary.py",
+      "tests/test_intr_destination_capability.py",
+      "docs/INTR_DESTINATION_CAPABILITY_MIRROR_HANDOFF.md",
+      ".github/workflows/**",
+      "tests/test_workflow_triggers.py",
+      "resident-runtime/cycle_request.py",
+      "resident-runtime/federation_cycle.py",
+      "resident-runtime/activation-manifest.json"
+     ]
+    }
    }
   },
   {
@@ -118,6 +158,64 @@
     "fetch_depth": "0",
     "persist_credentials": "true",
     "timeout_minutes": 30
+   },
+   "path_filters": {
+    "pull_request": {
+     "paths": [
+      ".github/workflows/intr-path-transfer.yml",
+      ".github/workflows/intr-path-ingress.yml",
+      "tools/tasks/folded/intr-path-transfer-validation.yml",
+      "tools/tasks/steps/intr-path-transfer-validation.unit/**",
+      ".stegverse/intr-path-transfer/**",
+      "resident-runtime/intr_path_transfer.py",
+      "resident-runtime/intr_path_ingress.py",
+      "resident-runtime/intr_path_ledger.py",
+      "resident-runtime/intr_path_tvc_read.py",
+      "tests/test_intr_path_tvc_read.py",
+      "tests/fixtures/intr-path-tvc-read/**",
+      "resident-runtime/merge_transfer_gitstore.py",
+      "resident-runtime/ledger_gitstore.py",
+      "tests/intr_path_temp_ledger.py",
+      "tests/test_intr_path_ledger.py",
+      "tests/fixtures/intr-path-ledger/**",
+      "resident-runtime/merge_transfer.py",
+      "resident-runtime/intr_destination_ingress.py",
+      "org-runtime/intr_protocol.py",
+      "data/intr-protocol/v1/protocol.json",
+      "tests/fixtures/intr-protocol/destinations/**",
+      "tests/test_intr_path_transfer.py",
+      "tests/test_intr_path_ingress.py",
+      "tests/test_intr_path_public_ledger_read.py",
+      "tests/fixtures/intr-path-ingress/**",
+      "tests/fixtures/intr-path-transfer/**",
+      "docs/INTR_PATH_TRANSFER_V1.md"
+     ]
+    },
+    "push": {
+     "paths": [
+      ".github/workflows/intr-path-transfer.yml",
+      ".github/workflows/intr-path-ingress.yml",
+      "tools/tasks/folded/intr-path-transfer-validation.yml",
+      "tools/tasks/steps/intr-path-transfer-validation.unit/**",
+      ".stegverse/intr-path-transfer/**",
+      "resident-runtime/intr_path_transfer.py",
+      "resident-runtime/intr_path_ingress.py",
+      "resident-runtime/intr_path_ledger.py",
+      "resident-runtime/intr_path_tvc_read.py",
+      "tests/test_intr_path_tvc_read.py",
+      "tests/fixtures/intr-path-tvc-read/**",
+      "resident-runtime/merge_transfer_gitstore.py",
+      "resident-runtime/ledger_gitstore.py",
+      "tests/intr_path_temp_ledger.py",
+      "tests/test_intr_path_ledger.py",
+      "tests/fixtures/intr-path-ledger/**",
+      "tests/test_intr_path_transfer.py",
+      "tests/test_intr_path_ingress.py",
+      "tests/test_intr_path_public_ledger_read.py",
+      "tests/fixtures/intr-path-ingress/**",
+      "tests/fixtures/intr-path-transfer/**"
+     ]
+    }
    }
   },
   {
@@ -171,6 +269,64 @@
     "fetch_depth": "0",
     "persist_credentials": "true",
     "timeout_minutes": 30
+   },
+   "path_filters": {
+    "pull_request": {
+     "paths": [
+      ".github/workflows/intr-path-transfer.yml",
+      ".github/workflows/intr-path-ingress.yml",
+      "tools/tasks/folded/intr-path-transfer-validation.yml",
+      "tools/tasks/steps/intr-path-transfer-validation.dry-run/**",
+      ".stegverse/intr-path-transfer/**",
+      "resident-runtime/intr_path_transfer.py",
+      "resident-runtime/intr_path_ingress.py",
+      "resident-runtime/intr_path_ledger.py",
+      "resident-runtime/intr_path_tvc_read.py",
+      "tests/test_intr_path_tvc_read.py",
+      "tests/fixtures/intr-path-tvc-read/**",
+      "resident-runtime/merge_transfer_gitstore.py",
+      "resident-runtime/ledger_gitstore.py",
+      "tests/intr_path_temp_ledger.py",
+      "tests/test_intr_path_ledger.py",
+      "tests/fixtures/intr-path-ledger/**",
+      "resident-runtime/merge_transfer.py",
+      "resident-runtime/intr_destination_ingress.py",
+      "org-runtime/intr_protocol.py",
+      "data/intr-protocol/v1/protocol.json",
+      "tests/fixtures/intr-protocol/destinations/**",
+      "tests/test_intr_path_transfer.py",
+      "tests/test_intr_path_ingress.py",
+      "tests/test_intr_path_public_ledger_read.py",
+      "tests/fixtures/intr-path-ingress/**",
+      "tests/fixtures/intr-path-transfer/**",
+      "docs/INTR_PATH_TRANSFER_V1.md"
+     ]
+    },
+    "push": {
+     "paths": [
+      ".github/workflows/intr-path-transfer.yml",
+      ".github/workflows/intr-path-ingress.yml",
+      "tools/tasks/folded/intr-path-transfer-validation.yml",
+      "tools/tasks/steps/intr-path-transfer-validation.dry-run/**",
+      ".stegverse/intr-path-transfer/**",
+      "resident-runtime/intr_path_transfer.py",
+      "resident-runtime/intr_path_ingress.py",
+      "resident-runtime/intr_path_ledger.py",
+      "resident-runtime/intr_path_tvc_read.py",
+      "tests/test_intr_path_tvc_read.py",
+      "tests/fixtures/intr-path-tvc-read/**",
+      "resident-runtime/merge_transfer_gitstore.py",
+      "resident-runtime/ledger_gitstore.py",
+      "tests/intr_path_temp_ledger.py",
+      "tests/test_intr_path_ledger.py",
+      "tests/fixtures/intr-path-ledger/**",
+      "tests/test_intr_path_transfer.py",
+      "tests/test_intr_path_ingress.py",
+      "tests/test_intr_path_public_ledger_read.py",
+      "tests/fixtures/intr-path-ingress/**",
+      "tests/fixtures/intr-path-transfer/**"
+     ]
+    }
    }
   },
   {
@@ -204,6 +360,15 @@
     "fetch_depth": "1",
     "persist_credentials": "true",
     "timeout_minutes": 30
+   },
+   "path_filters": {
+    "push": {
+     "paths": [
+      "org-boundary/**",
+      "tools/tasks/folded/org-boundary-execution.yml",
+      "tools/tasks/steps/org-boundary-execution.execute/**"
+     ]
+    }
    }
   },
   {
@@ -255,6 +420,24 @@
     "fetch_depth": "1",
     "persist_credentials": "true",
     "timeout_minutes": 30
+   },
+   "path_filters": {
+    "pull_request": {
+     "paths": [
+      "org-runtime/**",
+      "ORG_RESIDENT_RUNTIME_INTR_BOUNDARY_MIRROR_HANDOFF.md",
+      "tools/tasks/folded/org-runtime-boundary.yml",
+      "tools/tasks/steps/org-runtime-boundary.validate/**"
+     ]
+    },
+    "push": {
+     "paths": [
+      "org-runtime/**",
+      "ORG_RESIDENT_RUNTIME_INTR_BOUNDARY_MIRROR_HANDOFF.md",
+      "tools/tasks/folded/org-runtime-boundary.yml",
+      "tools/tasks/steps/org-runtime-boundary.validate/**"
+     ]
+    }
    }
   },
   {
@@ -270,6 +453,11 @@
      "name": "Workflow files equal the registered surfaces; catalog verifies ALLOW",
      "run_file": "tools/tasks/steps/workflow-surface-registry.validate/01-registry.sh",
      "run_sha256": "811824e88664923006be2eeb35632d710f5504145967f61632ad9e8fbdcb35ca"
+    },
+    {
+     "name": "Folded groups keep their original path filters (NOT_SELECTED, never skipped)",
+     "run_file": "tools/tasks/steps/workflow-surface-registry.validate/02-original-path-filters.sh",
+     "run_sha256": "9db82fbdf49b831995929ec2919b6ead95a650d1b9929cfb760742654aa3dbc7"
     }
    ],
    "artifacts": [],
