@@ -1,0 +1,38 @@
+{
+  "authority_effect": "NONE",
+  "boundary_evidence": {
+    "communication_id": "intr-path-v1:GCAT-BCAT-Engine->master-records",
+    "destination_organization": "master-records",
+    "disposition": "ALLOW",
+    "operation": "INTR_MESH_PATH_TRANSFER",
+    "path_id": "GCAT-BCAT-Engine->master-records:intr-destination",
+    "profile_id": "intr-mesh-path-transfer",
+    "repository": "GCAT-BCAT-Engine/.github",
+    "transfer_commit": "cda9e02f38fbf1915af77272e77f00f6126e7e21"
+  },
+  "canonical_state_transition_receipt_sha256": null,
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "derived_from_clock": false,
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 0,
+    "progression_dependency": "OSCILLATOR_ONLY"
+  },
+  "org_transition_class": "REPO_STATE_PROPAGATION",
+  "organization": "GCAT-BCAT-Engine",
+  "predecessor_org_state_sha256": "sha256:17a5d9da19f58f5f93697988b1733eb7c4ff81488b4ba63527342438e3cc9390",
+  "previous_receipt_sha256": "sha256:d7f96f95d9a0b488176e70d7a4ad97430b77608500ee1bee17ac31990aca27f1",
+  "receipt_sha256": "sha256:c4626648ec0715dbe4d2123b8ede3ab1597fb252a08966ab53bea75049c8b7e3",
+  "repo_receipt_sha256": "sha256:fa1cc32230899244b2df37b1ddfd1b23845bae363250663dd158951df6057d94",
+  "repo_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->master-records:intr-destination@intr-path-v1:GCAT-BCAT-Engine->master-records",
+  "schema": "stegverse.organization-transition-receipt/v1",
+  "source_receipt_schema": "stegverse.repo-transition-receipt/v1",
+  "source_repository": "GCAT-BCAT-Engine/.github",
+  "source_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->master-records:intr-destination@intr-path-v1:GCAT-BCAT-Engine->master-records",
+  "source_transition_sha256": "sha256:fa1cc32230899244b2df37b1ddfd1b23845bae363250663dd158951df6057d94",
+  "subject_or_correlation_id": null,
+  "successor_org_state_sha256": "sha256:ddc8beb38c1ece23079c21f3dd5cdc2d25b4c201c01d73ce549f1c945d3819e8"
+}
