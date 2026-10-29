@@ -1,0 +1,38 @@
+{
+  "authority_effect": "NONE",
+  "boundary_evidence": {
+    "communication_id": "intr-path-v1:GCAT-BCAT-Engine->formalism-tests",
+    "destination_organization": "formalism-tests",
+    "disposition": "ALLOW",
+    "operation": "INTR_MESH_PATH_TRANSFER",
+    "path_id": "GCAT-BCAT-Engine->formalism-tests:intr-destination",
+    "profile_id": "intr-mesh-path-transfer",
+    "repository": "GCAT-BCAT-Engine/.github",
+    "transfer_commit": "cda9e02f38fbf1915af77272e77f00f6126e7e21"
+  },
+  "canonical_state_transition_receipt_sha256": null,
+  "hb_reference": {
+    "authority_effect": "NONE",
+    "derived_from_clock": false,
+    "epoch": 469411832,
+    "frequency_hz": 100,
+    "generation": 469411832,
+    "heartbeat_id": "HB:469411832",
+    "phase_offset_ns": 0,
+    "progression_dependency": "OSCILLATOR_ONLY"
+  },
+  "org_transition_class": "REPO_STATE_PROPAGATION",
+  "organization": "GCAT-BCAT-Engine",
+  "predecessor_org_state_sha256": "sha256:6b8324c2a003fbee94e12ada02b83100fa6532d80feabb7f605e194fb910e0e0",
+  "previous_receipt_sha256": "sha256:fe15f72714a8c8b7b4bd92efe30fe1ba19c0ad58e00da548d75467e230a10528",
+  "receipt_sha256": "sha256:d7f96f95d9a0b488176e70d7a4ad97430b77608500ee1bee17ac31990aca27f1",
+  "repo_receipt_sha256": "sha256:4a9e968b4b5b1b2b1031a8854b6b3845b413ed8cd3d2dc770044f91eed159703",
+  "repo_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->formalism-tests:intr-destination@intr-path-v1:GCAT-BCAT-Engine->formalism-tests",
+  "schema": "stegverse.organization-transition-receipt/v1",
+  "source_receipt_schema": "stegverse.repo-transition-receipt/v1",
+  "source_repository": "GCAT-BCAT-Engine/.github",
+  "source_transition_id": "INTR_MESH_PATH_TRANSFER:GCAT-BCAT-Engine->formalism-tests:intr-destination@intr-path-v1:GCAT-BCAT-Engine->formalism-tests",
+  "source_transition_sha256": "sha256:4a9e968b4b5b1b2b1031a8854b6b3845b413ed8cd3d2dc770044f91eed159703",
+  "subject_or_correlation_id": null,
+  "successor_org_state_sha256": "sha256:9cf2a0f383f2b2df5b10b88bcc82fd3154110d872998e84f15b726405cec7edb"
+}
