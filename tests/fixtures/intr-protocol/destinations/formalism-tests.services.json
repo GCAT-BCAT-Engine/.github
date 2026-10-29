@@ -1,0 +1,106 @@
+{
+  "schema_version": "formalism-tests.service-registry.v1",
+  "organization": "formalism-tests",
+  "services": [
+    {
+      "service_id": "formalism-tests.org-control",
+      "repository": "formalism-tests/.github",
+      "boundary_role": "BOUNDARY_LOCAL_CONTROL",
+      "profile_status": "ACTIVE",
+      "accepts": [
+        "ecosystem.communication",
+        "ecosystem.monitor.request",
+        "ecosystem.work.request"
+      ],
+      "runtime_required_for_consumption": false
+    },
+    {
+      "service_id": "formalism-tests.boundary-diagnostic",
+      "repository": "formalism-tests/.github",
+      "boundary_role": "BOUNDARY_LOCAL_DIAGNOSTIC",
+      "profile_status": "ACTIVE",
+      "runtime_required_for_consumption": false
+    },
+    {
+      "service_id": "formalism-tests.existence",
+      "repository": "formalism-tests/Existence",
+      "boundary_role": "INTERNAL_ENDPOINT",
+      "profile_status": "NEEDS_REPOSITORY_HANDOFF_RECONCILIATION",
+      "runtime_required_for_consumption": true
+    },
+    {
+      "service_id": "formalism-tests.gcat-bcat",
+      "repository": "formalism-tests/GCAT-BCAT",
+      "boundary_role": "INTERNAL_ENDPOINT",
+      "profile_status": "NEEDS_REPOSITORY_HANDOFF_RECONCILIATION",
+      "runtime_required_for_consumption": true
+    },
+    {
+      "service_id": "formalism-tests.inference-window",
+      "repository": "formalism-tests/Inference-Window",
+      "boundary_role": "INTERNAL_ENDPOINT",
+      "profile_status": "NEEDS_REPOSITORY_HANDOFF_RECONCILIATION",
+      "runtime_required_for_consumption": true
+    },
+    {
+      "service_id": "formalism-tests.entropy-reversibility",
+      "repository": "formalism-tests/Entropy-Reversibility",
+      "boundary_role": "INTERNAL_ENDPOINT",
+      "profile_status": "NEEDS_REPOSITORY_HANDOFF_RECONCILIATION",
+      "runtime_required_for_consumption": true
+    },
+    {
+      "service_id": "formalism-tests.sandbox",
+      "repository": "formalism-tests/sandbox",
+      "boundary_role": "INTERNAL_ENDPOINT",
+      "profile_status": "NEEDS_REPOSITORY_HANDOFF_RECONCILIATION",
+      "runtime_required_for_consumption": true
+    },
+    {
+      "service_id": "formalism-tests.ecat-icat",
+      "repository": "formalism-tests/ECAT-ICAT",
+      "boundary_role": "INTERNAL_ENDPOINT",
+      "profile_status": "NEEDS_REPOSITORY_HANDOFF_RECONCILIATION",
+      "runtime_required_for_consumption": true
+    },
+    {
+      "service_id": "formalism-tests.transition-periodic-table",
+      "repository": "formalism-tests/Transition-Periodic-Table",
+      "boundary_role": "INTERNAL_ENDPOINT",
+      "profile_status": "NEEDS_REPOSITORY_HANDOFF_RECONCILIATION",
+      "runtime_required_for_consumption": true
+    },
+    {
+      "service_id": "formalism-tests.core-lite",
+      "repository": "formalism-tests/core-lite",
+      "boundary_role": "INTERNAL_ENDPOINT",
+      "profile_status": "NEEDS_REPOSITORY_HANDOFF_RECONCILIATION",
+      "runtime_required_for_consumption": true
+    },
+    {
+      "service_id": "formalism-tests.triad",
+      "repository": "formalism-tests/Triad",
+      "boundary_role": "INTERNAL_ENDPOINT",
+      "profile_status": "NEEDS_REPOSITORY_HANDOFF_RECONCILIATION",
+      "runtime_required_for_consumption": true
+    },
+    {
+      "service_id": "formalism-tests.intr-destination",
+      "repository": "formalism-tests/.github",
+      "boundary_role": "BOUNDARY_LOCAL_CAPABILITY_INGRESS",
+      "profile_status": "ACTIVE",
+      "capability_profile_id": "intr-destination",
+      "capability_binding_document": "org-runtime/interlock-intr.json",
+      "accepts": [
+        "ecosystem.communication",
+        "stegverse.org-intr-destination-diagnostic/v1"
+      ],
+      "runtime_required_for_consumption": true,
+      "admission_authority_constraint": "CONSTRAINT_VARIABLE",
+      "time_constraint": "CONSTRAINT_VARIABLE",
+      "disposition_role": "TRANSITION_EVIDENCE_ONLY",
+      "selects_processing_at_this_address": false
+    }
+  ],
+  "boundary_rule": "Cross-organization ingress/egress semantics are defined by the organization boundary; endpoint authority remains transition-governed."
+}

@@ -24,6 +24,10 @@
       "communication_id": "intr-path-v1:GCAT-BCAT-Engine->ECAT-ICAT-Formal"
     },
     {
+      "path_id": "GCAT-BCAT-Engine->Infrastructure-Continuity-Ventures:intr-destination",
+      "communication_id": "intr-path-v1:GCAT-BCAT-Engine->Infrastructure-Continuity-Ventures"
+    },
+    {
       "path_id": "GCAT-BCAT-Engine->SV-011:intr-destination",
       "communication_id": "intr-path-v1:GCAT-BCAT-Engine->SV-011"
     },
@@ -50,6 +54,14 @@
     {
       "path_id": "GCAT-BCAT-Engine->Triad-Test:intr-destination",
       "communication_id": "intr-path-v1:GCAT-BCAT-Engine->Triad-Test"
+    },
+    {
+      "path_id": "GCAT-BCAT-Engine->formalism-tests:intr-destination",
+      "communication_id": "intr-path-v1:GCAT-BCAT-Engine->formalism-tests"
+    },
+    {
+      "path_id": "GCAT-BCAT-Engine->master-records:intr-destination",
+      "communication_id": "intr-path-v1:GCAT-BCAT-Engine->master-records"
     }
   ]
 }
